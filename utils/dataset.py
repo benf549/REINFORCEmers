@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, Sampler
+from utils.constants import MAX_PEPTIDE_LENGTH
 
 
 def get_list_of_all_paths(path: str) -> list:
@@ -64,24 +65,46 @@ def get_complex_len(complex_data: dict) -> int:
 
 
 def collate_sampler_data(data: list):
-    outputs = defaultdict(list)
-    for complex_data, chain_key in data:
+    all_batch_data = defaultdict(list)
+    for idx, (complex_data, chain_key) in enumerate(data):
 
-        print(chain_key, '->')
+        # Get the sequence of the chain that we sampled the assembly with from cluster.
         chain_key_tuple = tuple(chain_key.split('-')[1:])
         curr_chain_sequence = complex_data[chain_key_tuple]['polymer_seq']
 
-        for chain_tup, chain_data in complex_data.items():
-            print(chain_data)
+        # Loop over the remaining chains and add them to the batch.
+        for _, chain_data in complex_data.items():
 
+            # If the seuqence of the current chain is the same as the chain 
+            #   we sampled from the cluster, set the chain mask to all ones.
+            #   Also just provide rotamers for anything less than MAX_PEPTIDE_LENGTH.
             identical_chains = chain_data['polymer_seq'] == curr_chain_sequence
-            if identical_chains:
+            if identical_chains or chain_data['size'] <= MAX_PEPTIDE_LENGTH:
                 chain_mask = torch.ones(chain_data['size'], dtype=torch.bool)
             else:
                 chain_mask = torch.zeros(chain_data['size'], dtype=torch.bool)
-            
-            
-            raise NotImplementedError
+
+            # Extract the rest of the chain data.
+            extra_atom_contact_mask = chain_data['extra_atom_contact_mask']
+            sequence_indices = chain_data['sequence_indices']
+            chi_angles = chain_data['chi_angles']
+            backbone_coords = chain_data['backbone_coords']
+            cb_atoms_within_10_counts = chain_data['residue_cb_counts']
+            batch_indices = torch.full((backbone_coords.shape[0],), idx, dtype=torch.long)
+
+            all_batch_data['chain_mask'].append(chain_mask)
+            all_batch_data['extra_atom_contact_mask'].append(extra_atom_contact_mask)
+            all_batch_data['sequence_indices'].append(sequence_indices)
+            all_batch_data['chi_angles'].append(chi_angles)
+            all_batch_data['backbone_coords'].append(backbone_coords)
+            all_batch_data['cb_atoms_within_10_counts'].append(cb_atoms_within_10_counts)
+            all_batch_data['batch_indices'].append(batch_indices)
+
+    # Concatenate all the data in the batch dimension.
+    outputs = {}
+    for i,j in all_batch_data.items():
+        outputs[i] = torch.cat(j, dim=0)
+    return outputs
 
 
 class ClusteredDatasetSampler(Sampler):
