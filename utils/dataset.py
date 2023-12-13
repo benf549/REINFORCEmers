@@ -64,8 +64,24 @@ def get_complex_len(complex_data: dict) -> int:
 
 
 def collate_sampler_data(data: list):
-    print(data)
-    raise NotImplementedError
+    outputs = defaultdict(list)
+    for complex_data, chain_key in data:
+
+        print(chain_key, '->')
+        chain_key_tuple = tuple(chain_key.split('-')[1:])
+        curr_chain_sequence = complex_data[chain_key_tuple]['polymer_seq']
+
+        for chain_tup, chain_data in complex_data.items():
+            print(chain_data)
+
+            identical_chains = chain_data['polymer_seq'] == curr_chain_sequence
+            if identical_chains:
+                chain_mask = torch.ones(chain_data['size'], dtype=torch.bool)
+            else:
+                chain_mask = torch.zeros(chain_data['size'], dtype=torch.bool)
+            
+            
+            raise NotImplementedError
 
 
 class ClusteredDatasetSampler(Sampler):
@@ -154,6 +170,9 @@ class ClusteredDatasetSampler(Sampler):
 
 
 class UnclusteredProteinChainDataset(Dataset):
+    """
+    Dataset where every pdb_assembly-segment-chain is a separate index.
+    """
     def __init__(self, params):
         self.pdb_code_to_complex_data = {} # Maps from pdb_code to protein complex/bioassembly data.
         self.chain_key_to_index = {} # Maps from unique index to chain_key
