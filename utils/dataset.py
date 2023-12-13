@@ -118,6 +118,7 @@ class ClusteredDatasetSampler(Sampler):
         # The unclustered dataset where each complex/assembly is a single index.
         self.dataset = dataset
         self.batch_size = params['batch_size']
+        self.sample_randomly = params['sample_randomly']
 
         # Load the cluster data.
         print("Loading sequence clusters.")
@@ -178,13 +179,37 @@ class ClusteredDatasetSampler(Sampler):
         # Sort the samples by size.
         curr_samples_tensor = torch.tensor(self.curr_samples)
         sizes = torch.tensor([self.dataset.index_to_complex_size[x] for x in self.curr_samples])
-    
-        # Yield the indexes in the order of the sorted sizes.
-        outputs = []
-        for batch in torch.chunk(curr_samples_tensor[torch.argsort(sizes)], len(self)):
-            outputs.append(batch.tolist())
-        np.random.shuffle(outputs)
-    
+        size_sort_indices = torch.argsort(sizes)
+
+        # iterate through the samples in order of size, create batches of size batch_size.
+        index = 0
+        debug_sizes = []
+        outputs, curr_list_sample_indices, curr_list_sizes = [], [], []
+        while index < len(size_sort_indices):
+            while sum(curr_list_sizes) < self.batch_size and index < len(size_sort_indices):
+                # Get current sample index and size.
+                curr_size_sort_index = size_sort_indices[index]
+                curr_sample_index = curr_samples_tensor[curr_size_sort_index].item()
+                curr_size = sizes[curr_size_sort_index].item()
+                # Add to the current batch.
+                curr_list_sample_indices.append(curr_sample_index)
+                curr_list_sizes.append(curr_size)
+                index += 1
+            # Add the current batch to the list of batches.
+            outputs.append(curr_list_sample_indices)
+            debug_sizes.append(sum(curr_list_sizes))
+            # Reset for next batch.
+            curr_list_sizes = []
+            curr_list_sample_indices = []
+
+        # Shuffle the batches.
+        if self.sample_randomly:
+            np.random.shuffle(outputs)
+
+        # Sanity check that we have the correct number of samples after iteration.
+        assert(sum(debug_sizes) == sizes.sum().item())
+
+        # Yield the batches we created.
         for batch in outputs:
             yield batch
 
