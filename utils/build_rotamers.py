@@ -240,3 +240,4 @@ def extend_coordinates(prev_atom_coords: torch.Tensor, bond_lengths: torch.Tenso
     d3 = -1 * bond_lengths * torch.sin(bond_angles) * torch.sin(dihedral_angles)
     next_coords = prev_atom_coords[:, 2] + (bc * d1) + (m1 * d2) + (ba * d3)
     return next_coords
+

@@ -3,12 +3,10 @@ import os
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from typing import Tuple, Dict, List, Union
+from typing import Tuple, Dict
 from collections import defaultdict
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import Dataset, Sampler
 from utils.constants import MAX_PEPTIDE_LENGTH
 
