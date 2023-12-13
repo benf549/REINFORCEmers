@@ -62,13 +62,18 @@ def chain_list_to_protein_chain_dict(chain_list: list) -> dict:
 def get_complex_len(complex_data: dict) -> int:
     return sum([x['size'] for x in complex_data.values()])
 
+
 def collate_sampler_data(data: list):
     print(data)
     raise NotImplementedError
 
+
 class ClusteredDatasetSampler(Sampler):
     """
     Samples a single protein complex from precomputed mmseqs clusters.
+    Ensures samples drawn evenly by sampling first from sequence clusters, then by pdb_code, then by assembly and chain.
+    Iteration returns batched indices for use in UnclusteredProteinChainDataset.
+    Pass to a DataLoader as a batch_sampler.
     """
     def __init__(self, dataset, params):
         # The unclustered dataset where each complex/assembly is a single index.
@@ -91,12 +96,22 @@ class ClusteredDatasetSampler(Sampler):
         self.sample_clusters()
 
     def get_curr_sample_len(self) -> int:
+        """
+        Returns the total length of the current samples in the dataset.
+        """
         return sum(self.dataset.index_to_complex_size[x] for x in self.curr_samples)
 
     def __len__(self) -> int:
+        """
+        Returns number of batches in the current epoch.
+        """
         return (self.get_curr_sample_len() + self.batch_size - 1) // self.batch_size
     
-    def sample_clusters(self):
+    def sample_clusters(self) -> None:
+        """
+        Randomly samples clusters from the dataset for the next epoch.
+        Updates the self.curr_samples list with new samples.
+        """
         self.curr_samples = []
         # Loop over mmseqs cluster and list of chains for that cluster.
         for cluster, chains in self.cluster_to_chains.items():
@@ -109,7 +124,7 @@ class ClusteredDatasetSampler(Sampler):
 
             # Given the PDB to sample from sample an assembly and chain for training.
             sampled_assembly_and_chains = np.random.choice(pdb_to_assembly_chains_map[sampled_pdb])
-  
+    
             # Reform the string representation of the sampled pdb_assembly-seg-chain.
             chain_key = '_'.join([sampled_pdb, sampled_assembly_and_chains])
 
@@ -117,6 +132,10 @@ class ClusteredDatasetSampler(Sampler):
             self.curr_samples.append(self.dataset.chain_key_to_index[chain_key])
         
     def __iter__(self):
+        """
+        Batches by size inspired by:
+        https://pytorch.org/docs/stable/data.html#torch.utils.data.Sampler:~:text=%3E%3E%3E%20class%20AccedingSequenceLengthBatchSampler,.tolist()
+        """
         # Sort the samples by size.
         curr_samples_tensor = torch.tensor(self.curr_samples)
         sizes = torch.tensor([self.dataset.index_to_complex_size[x] for x in self.curr_samples])
@@ -132,7 +151,6 @@ class ClusteredDatasetSampler(Sampler):
 
         # Resample for the next epoch.
         self.sample_clusters()
-
 
 
 class UnclusteredProteinChainDataset(Dataset):
