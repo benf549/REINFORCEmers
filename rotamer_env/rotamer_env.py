@@ -8,7 +8,7 @@ class rotamerEnv(gym.Env):
     metadata = {"render_modes": None, "render_fps": None}
     num_bins = 72
 
-    def __init__(self, render_mode=None):
+    def __init__(self, size, render_mode=None):
         
         #Define state space. There are 5 states, 1-4 corresponding to the current rotamer to decode, and 5 as a terminal state
         self.observation_space = spaces.Dict(
@@ -16,7 +16,7 @@ class rotamerEnv(gym.Env):
         )
 
         #Define action space. There are 72 bins, corresponding to 72 rotameric bins
-        self.action_space = spaces.Discrete(self.num_bins, dtype=int)
+        self.action_space = spaces.Tuple((spaces.Discrete(size), spaces.Discrete(self.num_bins)), dtype=int)
 
     def _get_obs(self):
         return {"agent": self._agent_location}
