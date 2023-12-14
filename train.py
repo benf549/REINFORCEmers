@@ -38,7 +38,12 @@ if __name__ == "__main__":
         'sample_randomly': True,
 
         'model_params': {
+            'dropout': 0.1,
             'node_embedding_dim': 128,
+            'edge_embedding_dim': 128,
+            'num_encoder_layers': 3,
+            'num_attention_heads': 3,
+            'use_mean_attention_aggr': True,
             'knn_graph_k': 48,
             'rbf_encoding_params': {'num_bins': 50, 'bin_min': 0.0, 'bin_max': 20.0},
         },
