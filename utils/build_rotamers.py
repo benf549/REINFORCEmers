@@ -10,16 +10,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from typing import Tuple, Optional
-from utils.constants import MAX_NUM_RESIDUE_ATOMS, ideal_aa_coords, ideal_bond_lengths, ideal_bond_angles, aa_to_chi_angle_atom_index, aa_to_leftover_atoms, alignment_indices, aa_short_to_idx, aa_idx_to_short
+from utils.constants import MAX_NUM_RESIDUE_ATOMS, CHI_BIN_MIN, CHI_BIN_MAX, ideal_aa_coords, ideal_bond_lengths, ideal_bond_angles, aa_to_chi_angle_atom_index, aa_to_leftover_atoms, alignment_indices, aa_short_to_idx
 
 
 class RotamerBuilder(nn.Module):
     """
     A class for building full atom models of proteins given chi angles.
+    Also used for embedding chi angles in an angular RBF.
     Built into a torch module to put all of the helper tensors on the GPU if necessary.
     """
-    def __init__(self):
+    def __init__(self, chi_angle_rbf_bin_width, **kwargs):
         super(RotamerBuilder, self).__init__()
+
+        # Set the width of the bins for the chi angles.
+        self.chi_angle_rbf_bin_width = chi_angle_rbf_bin_width
 
         # Pad ideal coords with NaNs to allow for indexing with MAX_NUM_RESIDUE_ATOMS indices.
         self.register_buffer('ideal_aa_coords', F.pad(ideal_aa_coords, (0, 0, 0, 1, 0, 0), 'constant', torch.nan))
@@ -30,6 +34,45 @@ class RotamerBuilder(nn.Module):
         self.register_buffer('alignment_indices', alignment_indices)
         self.register_buffer('backbone_frame_mask_1', torch.tensor([True, True, False, True, False]))
         self.register_buffer('backbone_frame_mask_2', torch.tensor([True, True, False, True, True]))
+
+        # Compute the number of chi angle bins, the embedding dimensionality, and the index to degree bin tensor.
+        self.num_chi_bins = int((180 * 2) / self.chi_angle_rbf_bin_width)
+        self.chi_angle_embed_dim = self.num_chi_bins * 4
+        self.register_buffer('index_to_degree_bin', torch.arange(CHI_BIN_MIN, CHI_BIN_MAX, self.chi_angle_rbf_bin_width).float())
+
+    def compute_binned_degree_basis_function(self, degrees: torch.Tensor, std_dev: Optional[float] = None) -> torch.Tensor:
+        """
+        Given degrees tensor (N, 4) of degrees between -180 and 180, computes the density of that value in circularly symmetric bin space.
+            Degree values can be NaN.
+
+        Basically implements an RBF for degrees between [-180, 180) with a standard deviation of half the bin width in degrees by 
+            default in modulus 360 degrees so -180 and 179 are 1 degree apart.
+
+        Each bin is a gaussian centered at the bin center (increments of 5 degrees) with a standard deviation of 2.5 degrees by default.
+        """
+
+        # Default standard deviation to half the bin width in degrees.
+        if std_dev is None:
+            std_dev = self.chi_angle_rbf_bin_width / 2
+        
+        # Reshape the input to allow subtraction broadcasting with the bin centers.
+        degree_input_shape = degrees.shape
+        if degrees.dim() != 1:
+            degrees = degrees.flatten().unsqueeze(-1)
+
+        # Compute offset in degrees relative to the current angle in circular bin space.
+        bin_degrees_exp = self.index_to_degree_bin.expand(degrees.shape[0], -1) # type: ignore
+        circular_bin_distance = torch.minimum(torch.remainder(bin_degrees_exp - degrees, 360), torch.remainder(degrees - bin_degrees_exp, 360))
+
+        # Encode offset in a gaussian with standard deviation of 5 degrees by default meaning the width of 1 bin is within +/- 1 of std_dev
+        A = torch.exp((-1/2) * (circular_bin_distance / std_dev) ** 2)
+
+        # Returns encoding normalized to sum to 1
+        # NOTE: Looks like input to cross-entropy does not need to be normalized (revisit if using for supervised learning).
+        out = A / A.sum(dim=1).unsqueeze(-1)
+
+        return out.reshape(*degree_input_shape, -1)
+
 
     def compute_backbone_alignment_matrices(self, full_atom_coords):
         """

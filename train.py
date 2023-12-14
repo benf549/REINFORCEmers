@@ -21,7 +21,7 @@ def main(params):
         for batch in tqdm(dataloader, total=len(dataloader), leave=False, desc=f'Training Epoch {epoch_num}'):
             optimizer.zero_grad()
 
-            out = model(batch)
+            predicted_chi_angle_logits = model(batch)
 
             raise NotImplementedError
             optimizer.step()
@@ -39,6 +39,7 @@ if __name__ == "__main__":
 
         'model_params': {
             'dropout': 0.1,
+            'chi_angle_rbf_bin_width': 5,
             'node_embedding_dim': 128,
             'edge_embedding_dim': 128,
             'num_encoder_layers': 3,

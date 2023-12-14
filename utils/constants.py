@@ -8,6 +8,7 @@ parent_path = Path(__file__).parent.absolute()
 EXTRA_ATOM_CONTACT_DISTANCE = 5.0
 MAX_PEPTIDE_LENGTH = 40
 NUM_CB_ATOMS_FOR_BURIAL = 16
+CHI_BIN_MIN, CHI_BIN_MAX = -180, 180
 
 # Map of canonical amino acid 1 to 3 letter codes.
 aa_short_to_long = {'C': 'CYS', 'D': 'ASP', 'S': 'SER', 'Q': 'GLN', 'K': 'LYS', 'I': 'ILE', 'P': 'PRO', 'T': 'THR', 'F': 'PHE', 'N': 'ASN', 'G': 'GLY', 'H': 'HIS', 'L': 'LEU', 'R': 'ARG', 'W': 'TRP', 'A': 'ALA', 'V': 'VAL', 'E': 'GLU', 'Y': 'TYR', 'M': 'MET', 'X': 'XAA'}
@@ -44,7 +45,6 @@ dataset_atom_order = {
 
 # The maximum number of atoms for a single residue.
 MAX_NUM_RESIDUE_ATOMS = max([len(res) for res in dataset_atom_order.values()])
-
 
 # Map from chi angle index to the atoms that define it. Includes rotatable hydrogen chi angles.
 aa_to_chi_angle_atom_map = {
