@@ -18,8 +18,8 @@ class BatchData():
     """
     Dataclass storing all the data for a batch of proteins for input to model.
     """
-    chain_mask: torch.Tensor
-    extra_atom_contact_mask: torch.Tensor
+    chain_mask: torch.Tensor # True if residue is NOT being trained over.
+    extra_atom_contact_mask: torch.Tensor # True if residue is in contact with extra atoms.
     sequence_indices: torch.Tensor
     chi_angles: torch.Tensor
     backbone_coords: torch.Tensor
@@ -35,7 +35,16 @@ class BatchData():
         Stores the edge_index and edge_distance tensors in the BatchData object.
         """
         self.edge_index = knn_graph(self.backbone_coords[:, 1], k=10, batch=self.batch_indices, loop=True)
+        # TODO: perturb coordinates with noise when building edge distances.
         self.edge_distance = torch.cdist(self.backbone_coords[self.edge_index[0]], self.backbone_coords[self.edge_index[1]]).flatten(start_dim=1)
+    
+    def to_device(self, device: torch.device) -> None:
+        """
+        Moves all tensors in the BatchData object to the specified device.
+        """
+        for k,v in self.__dict__.items():
+            if isinstance(v, torch.Tensor):
+                self.__dict__[k] = v.to(device)
 
 
 def get_list_of_all_paths(path: str) -> list:
