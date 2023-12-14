@@ -145,8 +145,8 @@ if __name__ == "__main__":
         'batch_size': 10_000,
         'learning_rate': 1e-4,
         'sample_randomly': True,
-        'train_splits_path': './files/train_splits.pt',
-        'test_splits_path': './files/test_splits.pt',
+        'train_splits_path': ('./files/train_splits_debug.pt' if debug else './files/train_splits.pt'),
+        'test_splits_path': ('./files/test_splits_debug.pt' if debug else './files/test_splits.pt'),
         'model_params': {
             'dropout': 0.1,
             'chi_angle_rbf_bin_width': 5,
