@@ -3,7 +3,6 @@ import torch.nn as nn
 from torch_scatter import scatter
 from utils.build_rotamers import RotamerBuilder
 from utils.dataset import BatchData
-from typing import Optional
 
 
 class ReinforcemerRepacker(nn.Module):
@@ -42,6 +41,13 @@ class ReinforcemerRepacker(nn.Module):
             ChiPredictionLayer(chi_edge_input_dim + (2 * self.rotamer_builder.num_chi_bins), self.rotamer_builder.num_chi_bins, node_embedding_dim, edge_embedding_dim, dropout, **kwargs),
             ChiPredictionLayer(chi_edge_input_dim + (3 * self.rotamer_builder.num_chi_bins), self.rotamer_builder.num_chi_bins, node_embedding_dim, edge_embedding_dim, dropout, **kwargs),
         ])
+
+    @property
+    def device(self) -> torch.device:
+        """
+        Returns the device that the model is currently on when addressed as model.device
+        """
+        return next(self.parameters()).device
 
     def forward(self, batch: BatchData):
         # Use sequence embeddings as initial embeddings for node message passing.

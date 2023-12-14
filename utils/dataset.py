@@ -5,6 +5,7 @@ import pandas as pd
 from tqdm import tqdm
 from typing import Tuple, Dict, Optional
 from collections import defaultdict
+from sklearn.model_selection import train_test_split
 
 import torch
 from torch_cluster import knn_graph
@@ -145,6 +146,72 @@ def collate_sampler_data(data: list) -> BatchData:
 
     return output_batch_data
 
+def generate_cluster_splits(params: dict, cluster_to_chains: dict, cluster_split_seed: int) -> None:
+    """
+    Generates train and test splits for the mmseqs clusters.
+    """
+    all_cluster_keys = np.array(list(cluster_to_chains.keys()))
+    train_data, test_data = train_test_split(all_cluster_keys, test_size=0.2, random_state=cluster_split_seed)
+    torch.save(set(train_data), params['train_splits_path'])
+    torch.save(set(test_data), params['test_splits_path'])
+
+
+class UnclusteredProteinChainDataset(Dataset):
+    """
+    Dataset where every pdb_assembly-segment-chain is a separate index.
+    """
+    def __init__(self, params, transform=None):
+        self.transform = transform
+        self.pdb_code_to_complex_data = {} # Maps from pdb_code to protein complex/bioassembly data.
+        self.chain_key_to_index = {} # Maps from unique index to chain_key
+        self.index_to_complex_size = {}
+        idx = 0
+        for path_to_data in tqdm(get_list_of_all_paths(params['dataset_path']), desc='Loading protein dataset.'):
+            pdb_prefix = path_to_data.rsplit('/', 1)[1].replace('.pt', '')
+
+            # Load the protein complex from disk, store with pdb_prefix as key.
+            protein_data = torch.load(path_to_data)
+            self.pdb_code_to_complex_data[pdb_prefix] = protein_data
+
+            # Loop over chains and assign a unique index to chain_key
+            for chain_key, chain_data in protein_data.items():
+                chain_key = '-'.join([pdb_prefix] + list(chain_key))
+                self.chain_key_to_index[chain_key] = idx
+                self.index_to_complex_size[idx] = get_complex_len(protein_data)
+                idx += 1
+        self.index_to_chain_key = {x: y for y,x in self.chain_key_to_index.items()}
+
+    def __len__(self) -> int:
+        return len(self.chain_key_to_index)
+
+    def __getitem__(self, index: int) -> Tuple[dict, str]:
+        # Take indexes unique to chain and return the complex data for that chain and the chain key.
+        chain_key = self.index_to_chain_key[index]
+        pdb_code = chain_key.split('-')[0]
+        output_data = self.pdb_code_to_complex_data[pdb_code]
+        if self.transform:
+            output_data = self.transform(output_data)
+        return output_data, chain_key
+
+
+class ProteinAssemblyDataset(Dataset):
+    """
+    Dataset where every biological assembly is a separate index.
+    """
+    def __init__(self, params):
+        self.data = {}
+        for path_to_data in tqdm(get_list_of_all_paths(params['dataset_path']), desc='Loading protein dataset.'):
+            pdb_prefix = path_to_data.rsplit('/', 1)[1]
+            self.data[pdb_prefix] = torch.load(path_to_data)
+        self.index_to_key = list(self.data.keys())
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, index: int) -> Tuple[dict, str]:
+        pdb_code = self.index_to_key[index]
+        return self.data[pdb_code], pdb_code
+    
 
 class ClusteredDatasetSampler(Sampler):
     """
@@ -153,7 +220,10 @@ class ClusteredDatasetSampler(Sampler):
     Iteration returns batched indices for use in UnclusteredProteinChainDataset.
     Pass to a DataLoader as a batch_sampler.
     """
-    def __init__(self, dataset, params):
+    def __init__(self, dataset: UnclusteredProteinChainDataset, params: dict, is_test_dataset_sampler: bool, cluster_split_seed: int = 0):
+        """
+        Takes a torch dataset, param dictionary, adn a boolean indicating whether to sample from the train or test clusters.
+        """
         # The unclustered dataset where each complex/assembly is a single index.
         self.dataset = dataset
         self.batch_size = params['batch_size']
@@ -161,8 +231,7 @@ class ClusteredDatasetSampler(Sampler):
 
         # Load the cluster data.
         print("Loading sequence clusters.")
-        df = pd.read_csv(os.path.join(params['clustering_output_path'], f"{params['clustering_output_prefix']}_cluster.tsv"), sep='\t', header=None)
-        df.columns = ['cluster_representative', 'chain']
+        df = pd.read_csv(os.path.join(params['clustering_output_path'], f"{params['clustering_output_prefix']}_cluster.tsv"), sep='\t', header=None, names=['cluster_representative', 'chain'])
 
         # Maps a given pdb_code+chain to its representative cluster.
         self.chain_to_cluster = create_chain_to_cluster_mapping(df, params)
@@ -170,9 +239,38 @@ class ClusteredDatasetSampler(Sampler):
         # Maps sequence cluster to number of chains.
         self.cluster_to_chains = invert_dict(self.chain_to_cluster)
 
+        # Generate random train and test cluster splits if necessary then load.
+        if not (os.path.exists(params['train_splits_path']) and os.path.exists(params['test_splits_path'])):
+            generate_cluster_splits(params, self.cluster_to_chains, cluster_split_seed)
+
+        # Load relevant pickled sets of cluster keys, filter for train/test as necessary.
+        self.train_split_clusters = torch.load(params['train_splits_path'])
+        self.test_split_clusters = torch.load(params['test_splits_path'])
+        self.cluster_to_chains = self.filter_clusters(is_test_dataset_sampler)
+
         # Sample the first epoch.
         self.curr_samples = []
         self.sample_clusters()
+    
+    def filter_clusters(self, is_test_dataset_sampler: bool) -> dict:
+        """
+        Filter clusters based on the given dataset sampler.
+            Parameters:
+            - is_test_dataset_sampler (bool): True if the dataset sampler is for the test dataset, False otherwise.
+
+            Returns:
+            - dict: A dictionary containing the filtered clusters.
+        """
+
+        if self.cluster_to_chains is None:
+            raise NotImplementedError("Unreachable.")
+
+        if is_test_dataset_sampler:
+            curr_cluster_set = self.test_split_clusters
+        else:
+            curr_cluster_set = self.train_split_clusters
+
+        return {k: v for k,v in self.cluster_to_chains.items() if k in curr_cluster_set}
 
     def get_curr_sample_len(self) -> int:
         """
@@ -254,60 +352,3 @@ class ClusteredDatasetSampler(Sampler):
 
         # Resample for the next epoch.
         self.sample_clusters()
-
-
-class UnclusteredProteinChainDataset(Dataset):
-    """
-    Dataset where every pdb_assembly-segment-chain is a separate index.
-    """
-    def __init__(self, params, transform=None):
-        self.transform = transform
-        self.pdb_code_to_complex_data = {} # Maps from pdb_code to protein complex/bioassembly data.
-        self.chain_key_to_index = {} # Maps from unique index to chain_key
-        self.index_to_complex_size = {}
-        idx = 0
-        for path_to_data in tqdm(get_list_of_all_paths(params['dataset_path']), desc='Loading protein dataset.'):
-            pdb_prefix = path_to_data.rsplit('/', 1)[1].replace('.pt', '')
-
-            # Load the protein complex from disk, store with pdb_prefix as key.
-            protein_data = torch.load(path_to_data)
-            self.pdb_code_to_complex_data[pdb_prefix] = protein_data
-
-            # Loop over chains and assign a unique index to chain_key
-            for chain_key, chain_data in protein_data.items():
-                chain_key = '-'.join([pdb_prefix] + list(chain_key))
-                self.chain_key_to_index[chain_key] = idx
-                self.index_to_complex_size[idx] = get_complex_len(protein_data)
-                idx += 1
-        self.index_to_chain_key = {x: y for y,x in self.chain_key_to_index.items()}
-
-    def __len__(self) -> int:
-        return len(self.chain_key_to_index)
-
-    def __getitem__(self, index: int) -> Tuple[dict, str]:
-        # Take indexes unique to chain and return the complex data for that chain and the chain key.
-        chain_key = self.index_to_chain_key[index]
-        pdb_code = chain_key.split('-')[0]
-        output_data = self.pdb_code_to_complex_data[pdb_code]
-        if self.transform:
-            output_data = self.transform(output_data)
-        return output_data, chain_key
-
-    
-class ProteinAssemblyDataset(Dataset):
-    """
-    Dataset where every biological assembly is a separate index.
-    """
-    def __init__(self, params):
-        self.data = {}
-        for path_to_data in tqdm(get_list_of_all_paths(params['dataset_path']), desc='Loading protein dataset.'):
-            pdb_prefix = path_to_data.rsplit('/', 1)[1]
-            self.data[pdb_prefix] = torch.load(path_to_data)
-        self.index_to_key = list(self.data.keys())
-
-    def __len__(self) -> int:
-        return len(self.data)
-
-    def __getitem__(self, index: int) -> Tuple[dict, str]:
-        pdb_code = self.index_to_key[index]
-        return self.data[pdb_code], pdb_code
