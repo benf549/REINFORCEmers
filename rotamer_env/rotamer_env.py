@@ -16,7 +16,7 @@ class rotamerEnv(gym.Env):
         )
 
         #Define action space. There are 72 bins, corresponding to 72 rotameric bins
-        self.action_space = spaces.Tuple((spaces.Discrete(size), spaces.Discrete(self.num_bins)), dtype=int)
+        self.action_space = spaces.Tuple(tuple(spaces.Discrete(72) for _ in range(size)), dtype=int)
 
     def _get_obs(self):
         return {"agent": self._agent_location}
@@ -46,5 +46,3 @@ class rotamerEnv(gym.Env):
 
         return observation, reward, terminated
     
-
-
