@@ -2,6 +2,7 @@ import numpy as np
 import gym
 import torch
 from gym import spaces
+from utils.compute_reward import compute_reward
 
 
 class rotamerEnv(gym.Env):
@@ -35,13 +36,16 @@ class rotamerEnv(gym.Env):
 
         return observation
     
-    def step(self, action, coords: torch.Tensor):
+    def step(self, action, coords: torch.Tensor, bb_bb_eidx: torch.Tensor, bb_label_indices: torch.Tensor):
         #finds first location of NaN which corresponds to the next rotamer to decode
         curr_chi = np.where(np.isnan(self._agent_location))[0][0]
         self._agent_location[curr_chi] = action
 
         terminated = not np.any(np.isnan(self._agent_location))
-        reward = 1
+        if not terminated:
+            reward = 0
+        else:
+            reward = compute_reward(coords, bb_bb_eidx, bb_label_indices)
         observation = self._get_obs()
 
         return observation, reward, terminated

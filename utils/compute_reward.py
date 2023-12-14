@@ -170,23 +170,17 @@ def compute_hbonding_adjacency_matrix(all_sc_distance_mtx, atom_element_list, nu
 
     return adjacency_matrix
 
-def generate_hydrogen_bonding_graph(full_residue_coords, bb_labels, sampled_aa, device=torch.device('cpu')):
+def generate_hydrogen_bonding_graph(full_residue_coords, bb_label_indices, device=torch.device('cpu')):
     """
-    Attempts to search for sidechain-mediated hydrogen bonding networks around the ligand to penalize in model loss.
-
     Compute the graph of residues that are capable of hydrogen bonding to eachother.
     Returns None if sampled residue does not have a sidechain O/N residue.
     """
-    # Check if the residue we sampled is capable of hydrogen bonding, if not there is no need to look for hydrogen bonding networks
-    if not sampled_aa in hbond_candidate_set:
-        return None, None
-    
-    label_indices = bb_labels.argmax(dim=1)
-    hbond_candidate_mask = torch.isin(label_indices, hbond_candidate_indices.to(device))
+
+    hbond_candidate_mask = torch.isin(bb_label_indices, hbond_candidate_indices.to(device))
     num_putative_hbonding = hbond_candidate_mask.sum().item()
 
     hbond_capable_coords = full_residue_coords[hbond_candidate_mask, 4:]
-    padded_sc_coords, atom_element_list = identify_sidechain_hydrogen_bonding_coordinates(hbond_capable_coords, hbond_candidate_mask, label_indices)
+    padded_sc_coords, atom_element_list = identify_sidechain_hydrogen_bonding_coordinates(hbond_capable_coords, hbond_candidate_mask, bb_label_indices)
 
     # Flatten to compute distances between all N/O atoms.
     padded_sc_coords = torch.cat(padded_sc_coords, dim=0).to(device)
@@ -196,3 +190,34 @@ def generate_hydrogen_bonding_graph(full_residue_coords, bb_labels, sampled_aa, 
     adjacency_matrix = compute_hbonding_adjacency_matrix(all_sc_distance_mtx, atom_element_list, num_putative_hbonding, device)
 
     return adjacency_matrix, hbond_candidate_mask
+
+def compute_hbond_reward(coords: torch.Tensor, bb_label_indices: torch.Tensor, device=torch.device('cpu')):
+    """
+    Compute the hydrogen bonding reward for a batch of proteins.
+    """
+    adjacency_matrix, hbond_candidate_mask = generate_hydrogen_bonding_graph(coords, bb_label_indices, device)
+
+    if adjacency_matrix is None:
+        return torch.tensor(0.0, device=device)
+
+    # Compute the number of hydrogen bonds formed between residues.
+    num_hbonds = adjacency_matrix.sum().item()
+
+    # Compute the reward as the number of hydrogen bonds formed.
+    return torch.tensor(num_hbonds, device=device)
+
+#to compute reward, need coordinate tensor, residue labels, and 
+def compute_reward(coords: torch.Tensor, bb_bb_eidx: torch.Tensor, bb_label_indices: torch.Tensor):
+
+    #compute clash and hbond contributions to reward
+    clash_penalty = compute_rotamer_clash_penalty(coords, bb_bb_eidx, bb_label_indices).item()
+    hbond_reward = compute_hbond_reward(coords, bb_label_indices).item()
+
+    #scale reward terms by max contribution
+    
+    max_val = max(clash_penalty, hbond_reward.item())
+    clash_penalty = clash_penalty / max_val
+    hbond_reward = hbond_reward / max_val
+    #TODO: play with scaling, realistically a clash is worse than the absence of a hbond
+    
+    return hbond_reward - clash_penalty
