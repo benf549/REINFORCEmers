@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
-from .constants import rotamer_alignment_tensor, leftover_atoms_tensor, ideal_bond_lengths_tensor, ideal_angles_tensor, ideal_aa_coords, aa_to_chi_angle_atom_index, aa_long2short, aa_to_chi_angle_mask, aa_name2aa_idx, dataset_atom_order, aa_long2short, aa_short2long, ATOM_IDENTITY_ENUM, DISULFIDE_S_CLASH_DIST, OTHER_ATOM_CLASH_DIST, METAL_CLASH_DIST, clash_matrix, aa_idx2aa_name, HARD_CLASH_TOLERANCE, CHI_BIN_MIN, CHI_BIN_MAX, amino_acid_to_atom_identity_matrix
+import numpy as np
+from .constants import rotamer_alignment_tensor, leftover_atoms_tensor, ideal_bond_lengths_tensor, ideal_angles_tensor, ideal_aa_coords, aa_to_chi_angle_atom_index, aa_long2short, aa_to_chi_angle_mask, aa_name2aa_idx, dataset_atom_order, aa_long2short, aa_short2long, ATOM_IDENTITY_ENUM, DISULFIDE_S_CLASH_DIST, OTHER_ATOM_CLASH_DIST, METAL_CLASH_DIST, clash_matrix, aa_idx2aa_name, HARD_CLASH_TOLERANCE, CHI_BIN_MIN, CHI_BIN_MAX, amino_acid_to_atom_identity_matrix, hbond_candidate_set, hbond_mask_dict, hbond_element_dict ,HBOND_CAPABLE_ELEMENTS, HBOND_MAX_DISTANCE, HBOND_MAX_DISTANCE, ON_TO_S_HBOND_MAX_DISTANCE, S_TO_S_HBOND_MAX_DISTANCE, hbond_candidate_indices
 
 SOFT_CLASH_THRESHOLD = 2.5
     
@@ -95,3 +96,103 @@ def compute_rotamer_clash_penalty(placed_aligned_rotamers, bb_bb_eidx, bb_label_
     
     return clash_penalties.sum() / placed_aligned_rotamers.shape[0]
 
+
+def pad_matrix_with_nan(data, target_size, last_dim=True):
+    """
+    Given some target size (target_size) for the last dimension of a torch tensor, 
+    pads the existing tensor with np.NaN up to that size along that last dimension.
+    """
+    if last_dim:
+        # Pad along last dimension.
+        last_dim_size = data.shape[-1]
+        if last_dim_size < target_size:
+            return F.pad(data.float(), (0, target_size - data.shape[-1]), 'constant', np.nan)
+        else:
+            return data
+    else:
+        # Pad along first dimension.
+        first_dim_size = data.shape[0]
+        if first_dim_size < target_size:
+            return F.pad(data.float(), (0, 0, 0, target_size - data.shape[0]), 'constant', np.nan)
+        else:
+            return data
+        
+def identify_sidechain_hydrogen_bonding_coordinates(hbond_capable_coords, hbond_candidate_mask, label_indices):
+    """
+    Iterate through the residues capable of forming sidechain-mediated hydrogen bonds and record the
+    coordinates of the atoms that can form hydrogen bonds and element identities of those atoms.
+    """
+    padded_sc_coords = []
+    atom_element_list = []
+    for idx, aa_label_idx in enumerate(label_indices[hbond_candidate_mask].cpu().tolist()):
+        residue_name = aa_idx2aa_name[aa_label_idx]
+        padded_sc_coords.append(pad_matrix_with_nan(hbond_capable_coords[idx, hbond_mask_dict[residue_name]], 3, last_dim=False))
+        sc_hbonding_atom_elements = hbond_element_dict[residue_name]
+
+        for i in range(3 - len(sc_hbonding_atom_elements)):
+            sc_hbonding_atom_elements.append(HBOND_CAPABLE_ELEMENTS.index('Padding'))
+        atom_element_list.extend(sc_hbonding_atom_elements)
+    return padded_sc_coords, torch.tensor(atom_element_list)
+
+def compute_hbonding_adjacency_matrix(all_sc_distance_mtx, atom_element_list, num_putative_hbonding, device=torch.device('cpu')):
+    """
+    Defines a hydrogen bond (quick to compute, not necessarily geometrically valid) by pairwise atom distances.
+    Implements different distance thresholds to define what an 'edge' is for hydrogen bonding which are selected 
+    based on the pair of atom identities that the distance is computed for.
+
+    Checks for hydrogen bonds between all pairs of Nitrogen, Oxygen, and Sulfur found in sidechains.
+    """
+    # Construct an 2 x N x N tensor tracking every pair of elements for a given adjacency matrix edge.
+    pairwise_element_encoding = torch.stack([
+        atom_element_list.unsqueeze(1).expand(all_sc_distance_mtx.shape), 
+        atom_element_list.expand(all_sc_distance_mtx.shape)
+    ]).to(device)
+
+    # If a pair of nitrogen and oxygen 
+    nitrogen_mask = (pairwise_element_encoding == HBOND_CAPABLE_ELEMENTS.index('N'))
+    oxygen_mask = (pairwise_element_encoding == HBOND_CAPABLE_ELEMENTS.index('O'))
+    sulfur_mask = (pairwise_element_encoding == HBOND_CAPABLE_ELEMENTS.index('S'))
+
+    # Count number of oxygens and nitrogens in the pair at a given index.
+    nitrogen_or_oxygen_mask = (nitrogen_mask | oxygen_mask).sum(dim=0)
+    # True if both atoms are sulfur.
+    sulfur_and_sulfur_mask = sulfur_mask.sum(dim=0) == 2
+    # True if one index is nitrogen or oxygen and the other is sulfur.
+    sulfur_and_NorO_mask = ((nitrogen_or_oxygen_mask == 1) & (sulfur_mask.sum(dim=0) > 0) & (~sulfur_and_sulfur_mask))
+    
+    A = ( (all_sc_distance_mtx < HBOND_MAX_DISTANCE) & (nitrogen_or_oxygen_mask == 2))
+    B = ( (all_sc_distance_mtx < ON_TO_S_HBOND_MAX_DISTANCE) & sulfur_and_NorO_mask)
+    C = ( (all_sc_distance_mtx < S_TO_S_HBOND_MAX_DISTANCE) & sulfur_and_sulfur_mask)
+    adjacency_matrix = A + B + C
+    adjacency_matrix = torch.stack(torch.split(adjacency_matrix, 3)).sum(dim=1)
+    adjacency_matrix = torch.stack(torch.split(adjacency_matrix, 3, dim=1)).sum(dim=2) > 0
+    adjacency_matrix = (1 - torch.eye(num_putative_hbonding, num_putative_hbonding, device=device)).bool() & adjacency_matrix
+
+    return adjacency_matrix
+
+def generate_hydrogen_bonding_graph(full_residue_coords, bb_labels, sampled_aa, device=torch.device('cpu')):
+    """
+    Attempts to search for sidechain-mediated hydrogen bonding networks around the ligand to penalize in model loss.
+
+    Compute the graph of residues that are capable of hydrogen bonding to eachother.
+    Returns None if sampled residue does not have a sidechain O/N residue.
+    """
+    # Check if the residue we sampled is capable of hydrogen bonding, if not there is no need to look for hydrogen bonding networks
+    if not sampled_aa in hbond_candidate_set:
+        return None, None
+    
+    label_indices = bb_labels.argmax(dim=1)
+    hbond_candidate_mask = torch.isin(label_indices, hbond_candidate_indices.to(device))
+    num_putative_hbonding = hbond_candidate_mask.sum().item()
+
+    hbond_capable_coords = full_residue_coords[hbond_candidate_mask, 4:]
+    padded_sc_coords, atom_element_list = identify_sidechain_hydrogen_bonding_coordinates(hbond_capable_coords, hbond_candidate_mask, label_indices)
+
+    # Flatten to compute distances between all N/O atoms.
+    padded_sc_coords = torch.cat(padded_sc_coords, dim=0).to(device)
+    all_sc_distance_mtx = torch.cdist(padded_sc_coords, padded_sc_coords)
+
+    # Convert distance matrix to an adjacency matrix with reduction to residue/residue interaction and self interactions removed.
+    adjacency_matrix = compute_hbonding_adjacency_matrix(all_sc_distance_mtx, atom_element_list, num_putative_hbonding, device)
+
+    return adjacency_matrix, hbond_candidate_mask
