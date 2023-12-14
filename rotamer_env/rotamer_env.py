@@ -6,6 +6,7 @@ from utils.compute_reward import compute_reward
 
 
 class rotamerEnv(gym.Env):
+    #makes sure environment doesn't render
     metadata = {"render_modes": None, "render_fps": None}
     num_bins = 72
 
@@ -42,6 +43,7 @@ class rotamerEnv(gym.Env):
         self._agent_location[curr_chi] = action
 
         terminated = not np.any(np.isnan(self._agent_location))
+        #does not calculate reward if the state is not terminal since partial building of side chains is both nontrivial and might not make physical sense
         if not terminated:
             reward = 0
         else:

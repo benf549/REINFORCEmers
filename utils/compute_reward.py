@@ -1,13 +1,13 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from .constants import rotamer_alignment_tensor, leftover_atoms_tensor, ideal_bond_lengths_tensor, ideal_angles_tensor, ideal_aa_coords, aa_to_chi_angle_atom_index, aa_long2short, aa_to_chi_angle_mask, aa_name2aa_idx, dataset_atom_order, aa_long2short, aa_short2long, ATOM_IDENTITY_ENUM, DISULFIDE_S_CLASH_DIST, OTHER_ATOM_CLASH_DIST, METAL_CLASH_DIST, clash_matrix, aa_idx2aa_name, HARD_CLASH_TOLERANCE, CHI_BIN_MIN, CHI_BIN_MAX, amino_acid_to_atom_identity_matrix, hbond_candidate_set, hbond_mask_dict, hbond_element_dict ,HBOND_CAPABLE_ELEMENTS, HBOND_MAX_DISTANCE, HBOND_MAX_DISTANCE, ON_TO_S_HBOND_MAX_DISTANCE, S_TO_S_HBOND_MAX_DISTANCE, hbond_candidate_indices
+from .constants import aa_long_to_idx, ATOM_IDENTITY_ENUM, DISULFIDE_S_CLASH_DIST, OTHER_ATOM_CLASH_DIST, clash_matrix, aa_idx2aa_name, HARD_CLASH_TOLERANCE,  amino_acid_to_atom_identity_matrix,  hbond_mask_dict, hbond_element_dict ,HBOND_CAPABLE_ELEMENTS, HBOND_MAX_DISTANCE, HBOND_MAX_DISTANCE, ON_TO_S_HBOND_MAX_DISTANCE, S_TO_S_HBOND_MAX_DISTANCE, hbond_candidate_indices
 
 SOFT_CLASH_THRESHOLD = 2.5
     
 
 def clash_loss_penalty(distances, residue_types_source, residue_types_sink, atom_types_source, atom_types_sink, clash_matrix_dev, max_penalty):
-    cysteine_index = aa_name2aa_idx['CYS']
+    cysteine_index = aa_long_to_idx['CYS']
 
     atom_types_source = atom_types_source.unsqueeze(-1).expand(-1, 15, 15)
     atom_types_sink = atom_types_sink.unsqueeze(-1).expand(-1, 15, 15)
@@ -24,7 +24,7 @@ def clash_loss_penalty(distances, residue_types_source, residue_types_sink, atom
     clash_distances[atom_pair_mask] = DISULFIDE_S_CLASH_DIST - HARD_CLASH_TOLERANCE
 
     atom_pair_mask = (
-        ((residue_types_source == aa_name2aa_idx['CYS']) & (residue_types_sink == aa_name2aa_idx['CYS'])) & (
+        ((residue_types_source == aa_long_to_idx['CYS']) & (residue_types_sink == aa_long_to_idx['CYS'])) & (
             ((atom_types_source == ATOM_IDENTITY_ENUM.index('C')) & (atom_types_sink == ATOM_IDENTITY_ENUM.index('S'))) | 
             ((atom_types_sink == ATOM_IDENTITY_ENUM.index('S')) & (atom_types_sink == ATOM_IDENTITY_ENUM.index('C')))
         )
@@ -193,7 +193,7 @@ def generate_hydrogen_bonding_graph(full_residue_coords, bb_label_indices, devic
 
 def compute_hbond_reward(coords: torch.Tensor, bb_label_indices: torch.Tensor, device=torch.device('cpu')):
     """
-    Compute the hydrogen bonding reward for a batch of proteins.
+    Compute number of hydrogen bonds given coordinate tensor for fully decoded protein.
     """
     adjacency_matrix, hbond_candidate_mask = generate_hydrogen_bonding_graph(coords, bb_label_indices, device)
 
@@ -219,5 +219,5 @@ def compute_reward(coords: torch.Tensor, bb_bb_eidx: torch.Tensor, bb_label_indi
     clash_penalty = clash_penalty / max_val
     hbond_reward = hbond_reward / max_val
     #TODO: play with scaling, realistically a clash is worse than the absence of a hbond
-    
+
     return hbond_reward - clash_penalty
