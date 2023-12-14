@@ -3,12 +3,39 @@ import os
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 from collections import defaultdict
 
 import torch
+from torch_cluster import knn_graph
 from torch.utils.data import Dataset, Sampler
-from utils.constants import MAX_PEPTIDE_LENGTH
+from utils.constants import MAX_PEPTIDE_LENGTH, NUM_CB_ATOMS_FOR_BURIAL
+from dataclasses import dataclass
+
+
+@dataclass
+class BatchData():
+    """
+    Dataclass storing all the data for a batch of proteins for input to model.
+    """
+    chain_mask: torch.Tensor
+    extra_atom_contact_mask: torch.Tensor
+    sequence_indices: torch.Tensor
+    chi_angles: torch.Tensor
+    backbone_coords: torch.Tensor
+    residue_buried_mask: torch.Tensor
+    batch_indices: torch.Tensor
+
+    edge_index: Optional[torch.Tensor] = None
+    edge_distance: Optional[torch.Tensor] = None
+
+    def construct_graph(self) -> None:
+        """
+        Computes a KNN graph using CA coordinates and distances between all pairs of atoms.
+        Stores the edge_index and edge_distance tensors in the BatchData object.
+        """
+        self.edge_index = knn_graph(self.backbone_coords[:, 1], k=10, batch=self.batch_indices, loop=True)
+        self.edge_distance = torch.cdist(self.backbone_coords[self.edge_index[0]], self.backbone_coords[self.edge_index[1]]).flatten(start_dim=1)
 
 
 def get_list_of_all_paths(path: str) -> list:
@@ -62,7 +89,7 @@ def get_complex_len(complex_data: dict) -> int:
     return sum([x['size'] for x in complex_data.values()])
 
 
-def collate_sampler_data(data: list):
+def collate_sampler_data(data: list) -> BatchData:
     all_batch_data = defaultdict(list)
     for idx, (complex_data, chain_key) in enumerate(data):
 
@@ -87,7 +114,7 @@ def collate_sampler_data(data: list):
             sequence_indices = chain_data['sequence_indices']
             chi_angles = chain_data['chi_angles']
             backbone_coords = chain_data['backbone_coords']
-            cb_atoms_within_10_counts = chain_data['residue_cb_counts']
+            residue_buried_mask = chain_data['residue_cb_counts'] > NUM_CB_ATOMS_FOR_BURIAL
             batch_indices = torch.full((backbone_coords.shape[0],), idx, dtype=torch.long)
 
             all_batch_data['chain_mask'].append(chain_mask)
@@ -95,14 +122,19 @@ def collate_sampler_data(data: list):
             all_batch_data['sequence_indices'].append(sequence_indices)
             all_batch_data['chi_angles'].append(chi_angles)
             all_batch_data['backbone_coords'].append(backbone_coords)
-            all_batch_data['cb_atoms_within_10_counts'].append(cb_atoms_within_10_counts)
+            all_batch_data['residue_buried_mask'].append(residue_buried_mask)
             all_batch_data['batch_indices'].append(batch_indices)
 
     # Concatenate all the data in the batch dimension.
     outputs = {}
     for i,j in all_batch_data.items():
         outputs[i] = torch.cat(j, dim=0)
-    return outputs
+    
+    # Create a BatchData object and compute the KNN graph.
+    output_batch_data = BatchData(**outputs)
+    output_batch_data.construct_graph()
+
+    return output_batch_data
 
 
 class ClusteredDatasetSampler(Sampler):
@@ -219,7 +251,8 @@ class UnclusteredProteinChainDataset(Dataset):
     """
     Dataset where every pdb_assembly-segment-chain is a separate index.
     """
-    def __init__(self, params):
+    def __init__(self, params, transform=None):
+        self.transform = transform
         self.pdb_code_to_complex_data = {} # Maps from pdb_code to protein complex/bioassembly data.
         self.chain_key_to_index = {} # Maps from unique index to chain_key
         self.index_to_complex_size = {}
@@ -246,7 +279,10 @@ class UnclusteredProteinChainDataset(Dataset):
         # Take indexes unique to chain and return the complex data for that chain and the chain key.
         chain_key = self.index_to_chain_key[index]
         pdb_code = chain_key.split('-')[0]
-        return self.pdb_code_to_complex_data[pdb_code], chain_key
+        output_data = self.pdb_code_to_complex_data[pdb_code]
+        if self.transform:
+            output_data = self.transform(output_data)
+        return output_data, chain_key
 
     
 class ProteinAssemblyDataset(Dataset):

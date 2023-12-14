@@ -7,6 +7,7 @@ parent_path = Path(__file__).parent.absolute()
 # Define distance that will be used to create a mask for residues.
 EXTRA_ATOM_CONTACT_DISTANCE = 5.0
 MAX_PEPTIDE_LENGTH = 40
+NUM_CB_ATOMS_FOR_BURIAL = 16
 
 # Map of canonical amino acid 1 to 3 letter codes.
 aa_short_to_long = {'C': 'CYS', 'D': 'ASP', 'S': 'SER', 'Q': 'GLN', 'K': 'LYS', 'I': 'ILE', 'P': 'PRO', 'T': 'THR', 'F': 'PHE', 'N': 'ASN', 'G': 'GLY', 'H': 'HIS', 'L': 'LEU', 'R': 'ARG', 'W': 'TRP', 'A': 'ALA', 'V': 'VAL', 'E': 'GLU', 'Y': 'TYR', 'M': 'MET', 'X': 'XAA'}
