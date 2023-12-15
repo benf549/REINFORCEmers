@@ -25,7 +25,6 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
 
     # Loop over batches in dataloader.
     epoch_data = defaultdict(float)
-    epoch_data['epoch'] = epoch_num
     for batch in tqdm(dataloader, total=len(dataloader), leave=False, desc=f'{"Training" if is_train_epoch else "Testing"} Epoch {epoch_num}'):
 
         # Zero previous gradients if in training epoch.
@@ -65,7 +64,6 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
 
     # Average loss over all samples.
     epoch_data['loss'] /= max(epoch_data['num_samples'], 1)
-
     return epoch_data
 
 
@@ -88,7 +86,7 @@ def test_epoch(model: ReinforcemerRepacker, dataloader: DataLoader, epoch_num: i
     return {'test_' + x: y for x,y in epoch_data.items()}
 
 
-def main(params):
+def main(params: dict) -> None:
     # Initialize device, model, and optimmizer for gradient descent.
     device = torch.device(params['device'])
     model = ReinforcemerRepacker(**params['model_params']).to(device)
@@ -119,7 +117,7 @@ def main(params):
                 torch.save(model.state_dict(), f"{params['weights_output_prefix']}_{epoch_num}.pt")
 
         # Combine train and test metadata.
-        epoch_data = {**train_epoch_data, **test_epoch_data}
+        epoch_data = {**train_epoch_data, **test_epoch_data, 'epoch': epoch_num}
 
         # Log metadata to wandb.
         if not params['debug']:
@@ -139,7 +137,7 @@ def main(params):
 if __name__ == "__main__":
     params = {
         'debug': (debug := False),
-        'weights_output_prefix': './model_weights/supervised_model_weights_tested',
+        'weights_output_prefix': './model_weights/supervised_model_weights_tested_layer_aggr',
         'num_workers': 2,
         'num_epochs': 100,
         'batch_size': 10_000,

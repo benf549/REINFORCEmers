@@ -179,19 +179,23 @@ class RotamerBuilder(nn.Module):
             torch.Tensor: Tensor containing the full atom coordinates. (N, MAX_NUM_RESIDUE_ATOMS, 3)
         """
 
+        # Handle X residues by treating them as 'X' residues internally.
+        seq_indices_clone = sequence_indices.clone()
+        seq_indices_clone[sequence_indices == aa_short_to_idx['X']] = aa_short_to_idx['G']
+
         # Create ideal atomic coordiantes for each residue and make a copy which we will use to compute alignment.
-        ideal_coords = self.ideal_aa_coords[sequence_indices] # type: ignore
+        ideal_coords = self.ideal_aa_coords[seq_indices_clone] # type: ignore
         ideal_coords_clone = ideal_coords.clone()
-        chi_atom_indices_expanded = self.aa_to_chi_angle_atom_index[sequence_indices] # type: ignore
+        chi_atom_indices_expanded = self.aa_to_chi_angle_atom_index[seq_indices_clone] # type: ignore
         predicted_atom = chi_atom_indices_expanded[:, :, -1]
 
         # Modifies ideal_coords_expanded in place to contain the (partially) rotated coordinates.
-        self.adjust_chi_rotatable_ideal_atom_placements(ideal_coords, chi_atom_indices_expanded, sequence_indices, predicted_atom, chi_angles)
+        self.adjust_chi_rotatable_ideal_atom_placements(ideal_coords, chi_atom_indices_expanded, seq_indices_clone, predicted_atom, chi_angles)
 
         # Lookup precomputed indices with which to compute a rigid body alignment between the adjusted ideal coordinates and leftover atoms.
-        leftover_atom_alignment_indices = self.alignment_indices[sequence_indices] # type: ignore
+        leftover_atom_alignment_indices = self.alignment_indices[seq_indices_clone] # type: ignore
         # Lookup the indices of the atoms that we will overwrite the un-adjusted ideal coordinates with.
-        leftover_mobile_indices = self.leftover_atom_indices[sequence_indices] # type: ignore
+        leftover_mobile_indices = self.leftover_atom_indices[seq_indices_clone] # type: ignore
 
         # Gather the fixed and mobile coordinates for the alignment.
         expanded_alignment_indices = leftover_atom_alignment_indices.unsqueeze(-1).expand(-1, -1, 3)
@@ -212,8 +216,8 @@ class RotamerBuilder(nn.Module):
         ideal_coords[row_indices, atom_indices] = leftover_mobile_coords[row_indices, col_indices]
 
         # Run the extension algorithm using aligned residues to adjust the hydrogens placed on tyrosine.
-        is_tyr_mask = sequence_indices == aa_short_to_idx['Y']
-        tyr_coords = self.place_tyr_hydrogens(ideal_coords[is_tyr_mask], sequence_indices[is_tyr_mask], chi_angles[is_tyr_mask, 2])
+        is_tyr_mask = seq_indices_clone == aa_short_to_idx['Y']
+        tyr_coords = self.place_tyr_hydrogens(ideal_coords[is_tyr_mask], seq_indices_clone[is_tyr_mask], chi_angles[is_tyr_mask, 2])
         ideal_coords[is_tyr_mask] = tyr_coords
 
         # Align the completely transformed ideal coordinates to the backbone coordinates.

@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch_scatter import scatter
 from utils.build_rotamers import RotamerBuilder
 from utils.dataset import BatchData
+from typing import Tuple
 
 
 class ReinforcemerRepacker(nn.Module):
@@ -49,7 +50,11 @@ class ReinforcemerRepacker(nn.Module):
         """
         return next(self.parameters()).device
 
-    def forward(self, batch: BatchData):
+    def forward(self, batch: BatchData) -> torch.Tensor:
+
+        # Store the chi angles actually predicted by the model.
+        output_chi_angles = torch.zeros(batch.backbone_coords.shape[0], 4, self.rotamer_builder.num_chi_bins, dtype=batch.chi_angles.dtype, device=batch.chi_angles.device)
+
         # Use sequence embeddings as initial embeddings for node message passing.
         bb_nodes = self.sequence_index_embedding_layer(batch.sequence_indices.long())
 
@@ -66,11 +71,19 @@ class ReinforcemerRepacker(nn.Module):
         for chi_layer in self.chi_prediction_layers:
             prev_chi = chi_layer(batch, bb_nodes, prev_chi, edge_attrs, self.rotamer_builder)
 
+        # Returns the predicted chi angle logits as (N, 4, num_chi_bins) tensor.
         return prev_chi.reshape(-1, 4, self.rotamer_builder.num_chi_bins)
     
 
 class EncoderModule(nn.Module):
-    def __init__(self, node_embedding_dim, edge_embedding_dim, dropout, num_attention_heads, use_mean_attention_aggr, **kwargs):
+    """
+    GATv2-attention-weighted Encoder Module that computes ProteinMPNN-stype node and edge updates.
+        Used for building node representations within coordinate-frame graph.
+    """
+    def __init__(
+        self, node_embedding_dim: int, edge_embedding_dim: int, dropout: float, 
+        num_attention_heads: int, use_mean_attention_aggr: bool, **kwargs
+    ) -> None:
         super(EncoderModule, self).__init__()
 
         self.dropout = nn.Dropout(dropout)
@@ -112,7 +125,7 @@ class EncoderModule(nn.Module):
         self.edge_norm = nn.LayerNorm(edge_embedding_dim)
 
 
-    def forward(self, bb_nodes, eidx, eattr):
+    def forward(self, bb_nodes: torch.Tensor, eidx: torch.Tensor, eattr: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
         # Expand the node embeddings to match the number of edges.
         source_nodes = bb_nodes[eidx[0]]
@@ -166,7 +179,7 @@ class RBF_Encoding(nn.Module):
     """
     Implements the RBF Encoding from ProteinMPNN as a module that can get stored in the model.
     """
-    def __init__(self, num_bins, bin_min, bin_max):
+    def __init__(self, num_bins: int, bin_min: float, bin_max: float):
         super(RBF_Encoding, self).__init__()
         self.num_bins = num_bins
         self.bin_min = bin_min
@@ -174,11 +187,14 @@ class RBF_Encoding(nn.Module):
         self.D_sigma =  (bin_max - bin_min) / num_bins
         self.register_buffer('D_mu', torch.linspace(bin_min, bin_max, num_bins).view([1,-1]))
 
-    def forward(self, distances):
-        # Convert distances in last dimension to RBF encoding in an expanded (num_bins) dimension.
+    def forward(self, distances: torch.Tensor) -> torch.Tensor:
+        """
+        Convert distances in last dimension to RBF encoding in an expanded (num_bins) dimension
+            (N, M)  -->  (N, M, num_bins)
+        """
         D_expand = torch.unsqueeze(distances, -1)
-        RBF = torch.exp(-((D_expand - self.D_mu) / self.D_sigma)**2) + 1E-8
-        return RBF
+        rbf_encoding = torch.exp(-((D_expand - self.D_mu) / self.D_sigma)**2) + 1E-8
+        return rbf_encoding
 
 
 class ChiPredictionLayer(nn.Module):
@@ -200,7 +216,7 @@ class ChiPredictionLayer(nn.Module):
         self.use_mean_attention_aggr = use_mean_attention_aggr
 
         self.leakyrelu = nn.LeakyReLU(0.2)
-        self.dropout = nn.Dropout()
+        self.dropout = nn.Dropout(dropout)
         self.concat_feature_dimension = input_dimension + edge_embedding_dim
         self.mha_aW = torch.nn.ModuleList([torch.nn.Linear(self.concat_feature_dimension, node_embedding_dim) for _ in range(self.nheads)])
         self.mha_aA = torch.nn.ModuleList([torch.nn.Linear(node_embedding_dim, 1) for _ in range(self.nheads)])
@@ -228,8 +244,10 @@ class ChiPredictionLayer(nn.Module):
 
         self.node_to_chi_output_layer = nn.Linear(node_embedding_dim, output_dimension)
 
-
-    def forward(self, batch: BatchData, bb_nodes: torch.Tensor, prev_chi: torch.Tensor, edge_attrs: torch.Tensor, rotamer_builder: RotamerBuilder):
+    def forward(
+        self, batch: BatchData, bb_nodes: torch.Tensor, prev_chi: torch.Tensor, 
+        edge_attrs: torch.Tensor, rotamer_builder: RotamerBuilder, teacher_force: bool = True
+    ) -> torch.Tensor:
 
         # Drop self-edges from graph so we don't provide the chi angle that we are predicting.
         self_edge_mask = batch.edge_index[0] == batch.edge_index[1] # type: ignore

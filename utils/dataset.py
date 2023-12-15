@@ -129,7 +129,7 @@ def collate_sampler_data(data: list) -> BatchData:
 
             all_batch_data['chain_mask'].append(chain_mask)
             all_batch_data['extra_atom_contact_mask'].append(extra_atom_contact_mask)
-            all_batch_data['sequence_indices'].append(sequence_indices)
+            all_batch_data['sequence_indices'].append(sequence_indices.long())
             all_batch_data['chi_angles'].append(chi_angles)
             all_batch_data['backbone_coords'].append(backbone_coords)
             all_batch_data['residue_buried_mask'].append(residue_buried_mask)
