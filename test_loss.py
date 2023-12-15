@@ -1,3 +1,3 @@
 from utils import loss
 
-loss()
+loss.fuckfuckfuck()

@@ -9,6 +9,7 @@ class rotamer_env(gym.Env):
     #makes sure environment doesn't render
     metadata = {"render_modes": None, "render_fps": None}
     num_bins = 72
+    size = 0
 
     def __init__(self, size=10, render_mode=None):
         
@@ -17,6 +18,9 @@ class rotamer_env(gym.Env):
 
         #Define action space. There are 72 bins, corresponding to 72 rotameric bins
         self.action_space = spaces.Tuple(tuple([spaces.Discrete(72) for _ in range(size)]))
+
+        self.size = size
+
     def _get_obs(self):
         return {"agent": self._agent_location}
     
@@ -28,7 +32,7 @@ class rotamer_env(gym.Env):
         super().reset(seed = seed)
 
         #Define the initial state of the environment. The agent is initialize as NaNs corresonding to no rotamers decoded
-        self._agent_location = np.empty(5, dtype=int)
+        self._agent_location = self._agent_location = np.empty(self.size, dtype=int)
 
         observation = self._get_obs()
 
@@ -36,8 +40,10 @@ class rotamer_env(gym.Env):
     
     def step(self, action, coords: torch.Tensor, bb_bb_eidx: torch.Tensor, bb_label_indices: torch.Tensor):
         #finds first location of NaN which corresponds to the next rotamer to decode
-        curr_chi = np.where(np.isnan(self._agent_location))[0][0]
-        self._agent_location[curr_chi] = action
+        for i, act in enumerate(action):
+            # finds first location of NaN which corresponds to the next rotamer to decode
+            curr_chi = np.where(np.isnan(self._agent_location))[i][0]
+            self._agent_location[curr_chi] = act
 
         terminated = not np.any(np.isnan(self._agent_location))
         #does not calculate reward if the state is not terminal since partial building of side chains is both nontrivial and might not make physical sense

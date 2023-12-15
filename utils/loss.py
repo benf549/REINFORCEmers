@@ -36,8 +36,7 @@ def transform_env(base_env:gym.Env):
 def compute_loss():
     raise NotImplementedError
 
-base_env = GymEnv("rotamer_env/rotamer_env-v0", device = device)
-embed() 
-env = transform_env(base_env(size=5))
-embed() 
-print(check_env_specs(env))
+def fuckfuckfuck():
+    base_env = gym.make("rotamer_env/rotamer_env-v0")
+    torch_base_env = GymEnv('rotamer_env/rotamer_env-v0')
+    print('yay!')
