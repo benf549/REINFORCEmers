@@ -59,11 +59,15 @@ def create_prody_protein_from_coordinate_matrix(full_protein_coords, amino_acid_
 
     return protein
 
-def batch_to_pdb_list(batch: BatchData, model: ReinforcemerRepacker) -> Dict[str, List[pr.AtomGroup]]:
-    model.eval()
-    _, chi_samples = model(batch)
+def batch_to_pdb_list(batch: BatchData, supervised_model: ReinforcemerRepacker, reinforced_model: ReinforcemerRepacker) -> Dict[str, List[pr.AtomGroup]]:
+    # Set models to eval mode.
+    supervised_model.eval()
+    reinforced_model.eval()
 
-    output = {'ground_truth': [], 'repacked': []}
+    _, supervised_chi_samples = supervised_model(batch)
+    _, reinforced_chi_samples = reinforced_model(batch)
+
+    output = {'ground_truth': [], 'supervised_repack': [], 'reinforced_repack': []}
     # Iterate through batch indices.
     for idx, batch_index in enumerate(sorted(list(set(batch.batch_indices.numpy())))):
         curr_batch_mask = batch.batch_indices == batch_index
@@ -71,30 +75,41 @@ def batch_to_pdb_list(batch: BatchData, model: ReinforcemerRepacker) -> Dict[str
         curr_ground_truth_chi_angles = batch.chi_angles[curr_batch_mask]
         curr_backbone_coords = batch.backbone_coords[curr_batch_mask]
         curr_sequence_indices = batch.sequence_indices[curr_batch_mask]
-        curr_sampled_chis = chi_samples[curr_batch_mask]
+        curr_supervised_sampled_chis = supervised_chi_samples[curr_batch_mask]
+        curr_reinforced_sampled_chis = reinforced_chi_samples[curr_batch_mask]
         curr_eval_mask = ~batch.extra_atom_contact_mask[curr_batch_mask]
 
         # Mask out non-existant chi angles.
         native_chi_mask = curr_ground_truth_chi_angles.isnan()
-        curr_sampled_chis[native_chi_mask] = torch.nan
+        curr_supervised_sampled_chis[native_chi_mask] = torch.nan
+        curr_reinforced_sampled_chis[native_chi_mask] = torch.nan
 
-        fa_model = model.rotamer_builder.build_rotamers(curr_backbone_coords, curr_ground_truth_chi_angles, curr_sequence_indices)
+        fa_model = supervised_model.rotamer_builder.build_rotamers(curr_backbone_coords, curr_ground_truth_chi_angles, curr_sequence_indices)
         prody_protein = create_prody_protein_from_coordinate_matrix(fa_model, curr_sequence_indices, curr_eval_mask.float())
         output['ground_truth'].append(prody_protein)
 
-        fa_model = model.rotamer_builder.build_rotamers(curr_backbone_coords, curr_sampled_chis, curr_sequence_indices)
+        fa_model = supervised_model.rotamer_builder.build_rotamers(curr_backbone_coords, curr_supervised_sampled_chis, curr_sequence_indices)
         prody_protein = create_prody_protein_from_coordinate_matrix(fa_model, curr_sequence_indices, curr_eval_mask.float())
-        output['repacked'].append(prody_protein)
+        output['supervised_repack'].append(prody_protein)
+
+        fa_model = reinforced_model.rotamer_builder.build_rotamers(curr_backbone_coords, curr_reinforced_sampled_chis, curr_sequence_indices)
+        prody_protein = create_prody_protein_from_coordinate_matrix(fa_model, curr_sequence_indices, curr_eval_mask.float())
+        output['reinforced_repack'].append(prody_protein)
 
     return output
 
 
 def main(params):
-    # Set the model weights
+    # Load supervised learning weights.
     device = torch.device(params['device'])
-    model = ReinforcemerRepacker(**params['model_params']).to(device)
-    model_weights = torch.load(params['weights_input_prefix'] + '_5.pt', map_location=device)
-    model.load_state_dict(model_weights)
+    model_supervised = ReinforcemerRepacker(**params['model_params']).to(device)
+    supervised_model_weights = torch.load(params['supervised_weights_input_prefix'], map_location=device)
+    model_supervised.load_state_dict(supervised_model_weights)
+
+    # Load reinforcement learning weights.
+    model_reinforced = ReinforcemerRepacker(**params['model_params']).to(device)
+    reinforced_model_weights = torch.load(params['reinforce_weights_input_prefix'], map_location=device)
+    model_reinforced.load_state_dict(reinforced_model_weights)
     
     # Load test data.
     protein_dataset = UnclusteredProteinChainDataset(params)
@@ -102,29 +117,32 @@ def main(params):
     test_dataloader = DataLoader(protein_dataset, batch_sampler=test_sampler, collate_fn=collate_sampler_data, num_workers=params['num_workers'], persistent_workers=True)
 
     all_ground_truth_proteins = []
-    all_repacked_proteins = []
+    all_supervised_repacked_proteins = []
+    all_rl_repacked_proteins = []
 
+    batch: BatchData
     for batch in tqdm(test_dataloader, total=len(test_dataloader)):
-        # Sanity check return type of dataloader iterator.
-        assert(isinstance(batch, BatchData))
-
-        batch.to_device(model.device)
+        batch.to_device(device)
         batch.construct_graph(0.0)
 
-        atom_group_dict = batch_to_pdb_list(batch, model)
+        atom_group_dict = batch_to_pdb_list(batch, model_supervised, model_reinforced)
+
         all_ground_truth_proteins.extend(atom_group_dict['ground_truth'])
-        all_repacked_proteins.extend(atom_group_dict['repacked'])
+        all_supervised_repacked_proteins.extend(atom_group_dict['supervised_repack'])
+        all_rl_repacked_proteins.extend(atom_group_dict['reinforced_repack'])
 
     for idx in range(len(all_ground_truth_proteins)):
-        pr.writePDB(f'./debug/ground_truth/{idx:05}.pdb', all_ground_truth_proteins[idx])
-        pr.writePDB(f'./debug/repacked/{idx:05}.pdb', all_repacked_proteins[idx])
+        pr.writePDB(f'./jerry_test_proteins/ground_truth/ground_truth_{idx:05}.pdb', all_ground_truth_proteins[idx])
+        pr.writePDB(f'./jerry_test_proteins/supervised/supervised_{idx:05}.pdb', all_supervised_repacked_proteins[idx])
+        pr.writePDB(f'./jerry_test_proteins/reinforced/reinforce_{idx:05}.pdb', all_rl_repacked_proteins[idx])
         
 
 if __name__ == "__main__":
     torch.set_num_threads(10)
     params = {
-        'debug': (debug := True),
-        'weights_input_prefix': './model_weights/reinforce_finetuned_from_best_backprop_reward',
+        'debug': (debug := False),
+        'supervised_weights_input_prefix': './model_weights/supervised_model_weights_teacher_forced_track_chi_acc_1_99.pt',
+        'reinforce_weights_input_prefix': './model_weights/reinforce_finetuned_from_best_backprop_reward_amp_20.pt',
         'num_workers': 2,
         'num_epochs': 100,
         'batch_size': 10_000,

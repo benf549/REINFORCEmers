@@ -97,7 +97,7 @@ class ReinforcemerRepacker(nn.Module):
             chi_logits[:, 0] = chi_idx_logits
 
             # Use remaining dense layers to compute chi angles from previous chi angles and bb_nodes.
-            for chi_idx, dense_layer in enumerate(self.chi_prediction_layers[1:]):
+            for chi_idx, dense_layer in enumerate(self.chi_prediction_layers[1:]): # type: ignore
                 prev_chi, chi_idx_logits, sampled_chi_angle, bb_nodes = dense_layer(bb_nodes, prev_chi, batch.chi_angles, use_teacher_force, self.rotamer_builder)
                 sampled_chi_angles[:, chi_idx + 1] = sampled_chi_angle
                 chi_logits[:, chi_idx + 1] = chi_idx_logits
