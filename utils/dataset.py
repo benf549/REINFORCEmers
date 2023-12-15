@@ -30,7 +30,7 @@ class BatchData():
     edge_index: Optional[torch.Tensor] = None
     edge_distance: Optional[torch.Tensor] = None
 
-    def construct_graph(self, training_noise) -> None:
+    def construct_graph(self, training_noise: float) -> None:
         """
         Computes a KNN graph using CA coordinates and distances between all pairs of atoms.
         Stores the edge_index and edge_distance tensors in the BatchData object.

@@ -10,12 +10,11 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
-from utils.build_rotamers import compute_num_chi_correct
+from utils.build_rotamers import compute_chi_angle_accuracies
 from utils.dataset import ClusteredDatasetSampler, UnclusteredProteinChainDataset, collate_sampler_data
 from utils.model import ReinforcemerRepacker
 from torch.utils.data import DataLoader 
 from collections import defaultdict
-
 
 
 def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.Adam], dataloader: DataLoader, epoch_num: int) -> dict:
@@ -66,7 +65,7 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
             loss.backward()
             optimizer.step()
 
-        chi_accuracy = compute_num_chi_correct(sampled_chi_angles, batch.chi_angles, model.rotamer_builder)
+        chi_accuracy = compute_chi_angle_accuracies(sampled_chi_angles, batch.chi_angles, model.rotamer_builder)
         for chi_acc, acc_value in chi_accuracy.items():
             epoch_list_data[chi_acc].append(acc_value)
         # Log debug information.

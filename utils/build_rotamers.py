@@ -14,9 +14,9 @@ from utils.constants import MAX_NUM_RESIDUE_ATOMS, CHI_BIN_MIN, CHI_BIN_MAX, ide
 
 
 @torch.no_grad()
-def compute_num_chi_correct(sampled_chi_angles, ground_truth_chi_angles, rotamer_builder):
+def compute_chi_angle_accuracies(sampled_chi_angles, ground_truth_chi_angles, rotamer_builder):
     """
-    Given N x 4 tensors of sampled and ground truth chi angles, computes the number of chi angles that are correct.
+    Given N x 4 tensors of sampled and ground truth chi angles, computes the accuracy of each chi angle predictions.
     """
 
     reindex_tensor = torch.tensor([0, 4], dtype=torch.long, device=sampled_chi_angles.device)

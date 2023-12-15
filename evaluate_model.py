@@ -3,13 +3,16 @@ import prody as pr
 import torch
 import torch.nn.functional as F
 from collections import defaultdict
+from typing import Dict, List, Optional
 
 from utils.dataset import ClusteredDatasetSampler, UnclusteredProteinChainDataset, collate_sampler_data, BatchData
 from utils.model import ReinforcemerRepacker
 from utils.constants import dataset_atom_order, aa_idx_to_short, aa_idx_to_long, aa_short_to_idx
 from torch.utils.data import DataLoader
 
-def create_prody_protein_from_coordinate_matrix(full_protein_coords, amino_acid_labels, bfactors = None):
+from tqdm import tqdm
+
+def create_prody_protein_from_coordinate_matrix(full_protein_coords, amino_acid_labels, bfactors: Optional[torch.Tensor] = None) -> pr.AtomGroup:
 
     # sanity check that the number of amino acid labels matches the number of coordinates
     assert(full_protein_coords.shape[0] == amino_acid_labels.shape[0])
@@ -56,12 +59,11 @@ def create_prody_protein_from_coordinate_matrix(full_protein_coords, amino_acid_
 
     return protein
 
-def batch_to_pdb_list(batch: BatchData, model: ReinforcemerRepacker):
-    pred_chi_logits = model(batch)
+def batch_to_pdb_list(batch: BatchData, model: ReinforcemerRepacker) -> Dict[str, List[pr.AtomGroup]]:
+    model.eval()
+    _, chi_samples = model(batch)
 
-    chi_samples = pred_chi_logits.argmax(dim=-1)
-    chi_samples = model.rotamer_builder.index_to_degree_bin[chi_samples] # type: ignore
-
+    output = {'ground_truth': [], 'repacked': []}
     # Iterate through batch indices.
     for idx, batch_index in enumerate(sorted(list(set(batch.batch_indices.numpy())))):
         curr_batch_mask = batch.batch_indices == batch_index
@@ -78,17 +80,20 @@ def batch_to_pdb_list(batch: BatchData, model: ReinforcemerRepacker):
 
         fa_model = model.rotamer_builder.build_rotamers(curr_backbone_coords, curr_ground_truth_chi_angles, curr_sequence_indices)
         prody_protein = create_prody_protein_from_coordinate_matrix(fa_model, curr_sequence_indices, curr_eval_mask.float())
-        pr.writePDB(f'test_ground_truth_{idx}.pdb', prody_protein)
+        output['ground_truth'].append(prody_protein)
 
         fa_model = model.rotamer_builder.build_rotamers(curr_backbone_coords, curr_sampled_chis, curr_sequence_indices)
         prody_protein = create_prody_protein_from_coordinate_matrix(fa_model, curr_sequence_indices, curr_eval_mask.float())
-        pr.writePDB(f'test_repacked_{idx}.pdb', prody_protein)
+        output['repacked'].append(prody_protein)
+
+    return output
 
 
 def main(params):
     # Set the model weights
-    model = ReinforcemerRepacker(**params['model_params'])
-    model_weights = torch.load(params['weights_input_prefix'] + '_99.pt')
+    device = torch.device(params['device'])
+    model = ReinforcemerRepacker(**params['model_params']).to(device)
+    model_weights = torch.load(params['weights_input_prefix'] + '_60.pt', map_location=device)
     model.load_state_dict(model_weights)
     
     # Load test data.
@@ -96,18 +101,29 @@ def main(params):
     test_sampler = ClusteredDatasetSampler(protein_dataset, params, is_test_dataset_sampler=True)
     test_dataloader = DataLoader(protein_dataset, batch_sampler=test_sampler, collate_fn=collate_sampler_data, num_workers=params['num_workers'], persistent_workers=True)
 
-    for batch in test_dataloader:
+    all_ground_truth_proteins = []
+    all_repacked_proteins = []
+
+    for batch in tqdm(test_dataloader, total=len(test_dataloader)):
         # Sanity check return type of dataloader iterator.
         assert(isinstance(batch, BatchData))
 
-        pdb_list = batch_to_pdb_list(batch, model)
-        raise NotImplementedError
+        batch.to_device(model.device)
+        batch.construct_graph(0.0)
+
+        atom_group_dict = batch_to_pdb_list(batch, model)
+        all_ground_truth_proteins.extend(atom_group_dict['ground_truth'])
+        all_repacked_proteins.extend(atom_group_dict['repacked'])
+
+    for idx in range(len(all_ground_truth_proteins)):
+        pr.writePDB(f'./jerry_test_proteins/ground_truth/{idx:05}.pdb', all_ground_truth_proteins[idx])
+        pr.writePDB(f'./jerry_test_proteins/repacked/{idx:05}.pdb', all_repacked_proteins[idx])
         
 
 if __name__ == "__main__":
     params = {
-        'debug': (debug := True),
-        'weights_input_prefix': './model_weights/supervised_model_weights_tested_layer_aggr',
+        'debug': (debug := False),
+        'weights_input_prefix': './model_weights/supervised_model_weights_teacher_forced',
         'num_workers': 2,
         'num_epochs': 100,
         'batch_size': 10_000,
@@ -122,11 +138,11 @@ if __name__ == "__main__":
             'edge_embedding_dim': 128,
             'num_encoder_layers': 3,
             'num_attention_heads': 3,
-            'use_mean_attention_aggr': False,
+            'use_mean_attention_aggr': True,
             'knn_graph_k': 24,
             'rbf_encoding_params': {'num_bins': 50, 'bin_min': 0.0, 'bin_max': 20.0},
         },
-        'device': 'cuda:6',
+        'device': 'cpu',
         'dataset_path': '/scratch/bfry/torch_bioasmb_dataset' + ('/w7' if debug else ''),
         'clustering_output_prefix': 'torch_bioas_cluster30',
         'clustering_output_path': (output_path := '/scratch/bfry/bioasmb_dataset_sequence_clustering/'),

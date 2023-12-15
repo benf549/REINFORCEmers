@@ -323,6 +323,5 @@ class ChiPredictionLayer(nn.Module):
             encoded_chi_angle = rotamer_builder.compute_binned_degree_basis_function(ground_truth_chi_angle.unsqueeze(-1)).nan_to_num().squeeze(1)
         else:
             encoded_chi_angle = rotamer_builder.compute_binned_degree_basis_function(predicted_chi_angle.unsqueeze(-1)).nan_to_num().squeeze(1)
-        ############
 
         return torch.cat([prev_chi, encoded_chi_angle], dim=1), predicted_chi_logits, predicted_chi_angle
