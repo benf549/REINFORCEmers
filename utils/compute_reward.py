@@ -210,7 +210,7 @@ def compute_hbond_reward(coords: torch.Tensor, bb_label_indices: torch.Tensor, d
 def compute_reward(coords: torch.Tensor, bb_bb_eidx: torch.Tensor, bb_label_indices: torch.Tensor):
 
     #compute clash and hbond contributions to reward
-    clash_penalty = compute_rotamer_clash_penalty(coords, bb_bb_eidx, bb_labcel_indices).item()
+    clash_penalty = compute_rotamer_clash_penalty(coords, bb_bb_eidx, bb_label_indices).item()
     hbond_reward = compute_hbond_reward(coords, bb_label_indices).item()
 
     #scale reward terms by max contribution
