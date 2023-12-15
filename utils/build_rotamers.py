@@ -13,6 +13,47 @@ from typing import Tuple, Optional
 from utils.constants import MAX_NUM_RESIDUE_ATOMS, CHI_BIN_MIN, CHI_BIN_MAX, ideal_aa_coords, ideal_bond_lengths, ideal_bond_angles, aa_to_chi_angle_atom_index, aa_to_leftover_atoms, alignment_indices, aa_short_to_idx
 
 
+@torch.no_grad()
+def compute_num_chi_correct(sampled_chi_angles, ground_truth_chi_angles, rotamer_builder):
+    """
+    Given N x 4 tensors of sampled and ground truth chi angles, computes the number of chi angles that are correct.
+    """
+
+    reindex_tensor = torch.tensor([0, 4], dtype=torch.long, device=sampled_chi_angles.device)
+
+    nan_mask = ground_truth_chi_angles.isnan()
+    sampled_chi_angles[nan_mask] = torch.nan
+
+    # Find angles within bin width of ground truth chi angle.
+    bool_mask = torch.minimum(torch.remainder(ground_truth_chi_angles - sampled_chi_angles, 360), torch.remainder(sampled_chi_angles - ground_truth_chi_angles, 360)) < rotamer_builder.chi_angle_rbf_bin_width
+
+    # Get the index of the first False value in each row. 
+    min_indices = bool_mask.long().argmin(dim=1)
+
+    # Handle case where all values are True or all values are False.
+    first_index_mask = min_indices == 0
+
+    # Get values for the case where min_indices is 0.
+    min_values = bool_mask[first_index_mask].gather(1, min_indices[first_index_mask].unsqueeze(-1)).long()
+    min_indices[first_index_mask] = reindex_tensor[min_values].flatten()
+
+    output = {}
+    for i in range(1, 5):
+        # Count number of sampled chi angles that have chi_i correct.
+        chi_i_correct = 0
+        for j in range(i, 5):
+            chi_i_correct += (min_indices == j).sum().item()
+
+        # Count number of residues that have a chi_i.
+        num_chi_i = (~(ground_truth_chi_angles[:, i - 1].isnan())).sum().item()
+
+        # Compute accuracy for residues that have exactly i chi angles.
+        chi_i_acc = chi_i_correct / max(num_chi_i, 1)
+        output[f'chi_{i}_acc'] = chi_i_acc
+
+    return output
+
+
 class RotamerBuilder(nn.Module):
     """
     A class for building full atom models of proteins given chi angles.

@@ -10,10 +10,12 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
+from utils.build_rotamers import compute_num_chi_correct
 from utils.dataset import ClusteredDatasetSampler, UnclusteredProteinChainDataset, collate_sampler_data
 from utils.model import ReinforcemerRepacker
 from torch.utils.data import DataLoader 
 from collections import defaultdict
+
 
 
 def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.Adam], dataloader: DataLoader, epoch_num: int) -> dict:
@@ -24,6 +26,7 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
     is_train_epoch = optimizer is not None
 
     # Loop over batches in dataloader.
+    epoch_list_data = defaultdict(list)
     epoch_data = defaultdict(float)
     for batch in tqdm(dataloader, total=len(dataloader), leave=False, desc=f'{"Training" if is_train_epoch else "Testing"} Epoch {epoch_num}'):
 
@@ -49,10 +52,6 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
 
         # Compute supervised learning loss over residues that are not in contact with extra atoms, step loss and optimize.
         chi_logits, sampled_chi_angles = model(batch)
-        # print(sampled_chi_angles, batch.chi_angles)
-        # bool_mask = torch.isclose(sampled_chi_angles, batch.chi_angles)
-        # min_indices = bool_mask.argmin(dim=1)
-        # raise NotImplementedError
         ground_truth_chi_angles = model.rotamer_builder.compute_binned_degree_basis_function(batch.chi_angles).nan_to_num()
 
         chi_logits = chi_logits[valid_residue_mask]
@@ -67,13 +66,17 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
             loss.backward()
             optimizer.step()
 
+        chi_accuracy = compute_num_chi_correct(sampled_chi_angles, batch.chi_angles, model.rotamer_builder)
+        for chi_acc, acc_value in chi_accuracy.items():
+            epoch_list_data[chi_acc].append(acc_value)
         # Log debug information.
         epoch_data['loss'] += loss.item()
         epoch_data['num_samples'] += chi_mask.any(dim=1).sum() # Track number of residues that have at least one valid chi angle.
 
     # Average loss over all samples.
     epoch_data['loss'] /= max(epoch_data['num_samples'], 1)
-    return epoch_data
+    epoch_list_data = {x: sum(y) / max(len(y), 1) for x,y in epoch_list_data.items()}
+    return {**epoch_data, **epoch_list_data}
 
 
 def train_epoch(model: ReinforcemerRepacker, optimizer: torch.optim.Adam, dataloader: DataLoader, epoch_num: int) -> dict:
@@ -146,7 +149,7 @@ def main(params: dict) -> None:
 if __name__ == "__main__":
     params = {
         'debug': (debug := False),
-        'weights_output_prefix': './model_weights/supervised_model_weights_teacher_forced',
+        'weights_output_prefix': './model_weights/supervised_model_weights_teacher_forced_track_chi_acc',
         'num_workers': 2,
         'num_epochs': 100,
         'batch_size': 10_000,
@@ -166,7 +169,7 @@ if __name__ == "__main__":
             'knn_graph_k': 24,
             'rbf_encoding_params': {'num_bins': 50, 'bin_min': 0.0, 'bin_max': 20.0},
         },
-        'device': 'cuda:6',
+        'device': 'cuda:0',
         'dataset_path': '/scratch/bfry/torch_bioasmb_dataset' + ('/w7' if debug else ''),
         'clustering_output_prefix': 'torch_bioas_cluster30',
         'clustering_output_path': (output_path := '/scratch/bfry/bioasmb_dataset_sequence_clustering/'),
