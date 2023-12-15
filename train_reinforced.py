@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
 
 import wandb
-
 from tqdm import tqdm
 from typing import Optional
 from collections import defaultdict
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader 
+from torch.utils.data import DataLoader
 
 from utils.build_rotamers import compute_chi_angle_accuracies
 from utils.dataset import ClusteredDatasetSampler, UnclusteredProteinChainDataset, collate_sampler_data, BatchData
 from utils.model import ReinforcemerRepacker
+from utils.compute_reward import compute_pairwise_clash_penalties
 
 
-def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.Adam], dataloader: DataLoader, epoch_num: int, params: dict) -> dict:
+def compute_reinforce_loss(log_prob_action, reward):
     """
-    Handle a single epoch of training or testing.
-        Assumes model is in train mode if optimizer is provided, and eval mode otherwise.
+    Define the simplest REINFORCE loss we can optimize with gradient descent.
     """
+    return -log_prob_action * reward
+
+
+def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.Adam], dataloader: DataLoader, epoch_num: int, params: dict):
+
     is_train_epoch = optimizer is not None
 
     # Loop over batches in dataloader.
@@ -31,14 +35,14 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
         # Zero previous gradients if in training epoch.
         if is_train_epoch:
             optimizer.zero_grad()
-
+        
         # Move batch to device, build graph and perturb by noise if a train epoch to reduce overfitting.
         batch.to_device(model.device)
         batch.construct_graph(params['training_noise'] if is_train_epoch else 0.0)
 
         # Compute training mask: residues that are not in contact with extra atoms and being trained on.
         valid_residue_mask = (~batch.extra_atom_contact_mask) & (~batch.chain_mask)
-        
+
         # Compute mask of chi angles that are relevant the given amino acid.
         chi_mask = ~batch.chi_angles.isnan() 
         chi_mask = chi_mask[valid_residue_mask]
@@ -48,16 +52,25 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
         if num_valid_residues == 0:
             continue
 
-        # Compute supervised learning loss over residues that are not in contact with extra atoms, step loss and optimize.
+        # REINFORCE loss over residues that are not in contact with extra atoms, step loss and optimize.
         chi_logits, sampled_chi_angles = model(batch)
-        ground_truth_chi_angles = model.rotamer_builder.compute_binned_degree_basis_function(batch.chi_angles).nan_to_num()
 
-        chi_logits = chi_logits[valid_residue_mask]
-        ground_truth_chi_angles = ground_truth_chi_angles[valid_residue_mask]
+        # Extract just the log probability of the sampled 'actions' (chi angles).
+        log_probs = F.log_softmax(chi_logits, dim=-1)
+        sampled_chi_indices = model.rotamer_builder.compute_binned_degree_basis_function(sampled_chi_angles).argmax(dim=-1)
+        log_prob_action = log_probs.gather(2, sampled_chi_indices.unsqueeze(-1)).squeeze(-1)
+        log_prob_action = log_prob_action[valid_residue_mask]
 
-        # Compute supervised learning loss.
-        loss = F.cross_entropy(chi_logits[chi_mask], ground_truth_chi_angles[chi_mask], reduction='sum')
-        loss /= max(chi_mask.any(dim=1).sum().item(), 1)
+        # Compute reward for each sampled chi angle.
+        with torch.no_grad():
+            designed_coords = model.rotamer_builder.build_rotamers(batch.backbone_coords, sampled_chi_angles, batch.sequence_indices)
+            ground_truth_coords = model.rotamer_builder.build_rotamers(batch.backbone_coords, batch.chi_angles, batch.sequence_indices)
+            reward = -1 * compute_pairwise_clash_penalties(ground_truth_coords, designed_coords, batch.edge_index, batch.sequence_indices, penalty_max=params['max_clash_penalty'])
+            reward = reward[valid_residue_mask].unsqueeze(-1).expand(-1, 4)
+
+
+        loss = compute_reinforce_loss(log_prob_action[chi_mask], reward[chi_mask]).sum()
+        loss = loss / max(chi_mask.any(dim=1).sum().item(), 1)
 
         # Step for gradient descent if optimizer is provided.
         if is_train_epoch:
@@ -79,10 +92,7 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
     return {**epoch_data, **epoch_list_data}
 
 
-def train_epoch(model: ReinforcemerRepacker, optimizer: torch.optim.Adam, dataloader: DataLoader, epoch_num: int, params: dict) -> dict:
-    """
-    Train model on train set.
-    """
+def train_epoch(model: ReinforcemerRepacker, optimizer: torch.optim.Adam, dataloader: DataLoader, epoch_num: int, params: dict):
     model.train()
     epoch_data = process_epoch(model, optimizer, dataloader, epoch_num, params)
     return {'train_' + x: y for x,y in epoch_data.items()}
@@ -91,7 +101,7 @@ def train_epoch(model: ReinforcemerRepacker, optimizer: torch.optim.Adam, datalo
 @torch.no_grad()
 def test_epoch(model: ReinforcemerRepacker, dataloader: DataLoader, epoch_num: int, params: dict) -> dict:
     """
-    Evaluate model on test set.
+    Evaluate model on test set. model.eval() enables autoregressive sampling.
     """
     model.eval()
     epoch_data = process_epoch(model, None, dataloader, epoch_num, params)
@@ -102,6 +112,9 @@ def main(params: dict) -> None:
     # Initialize device, model, and optimmizer for gradient descent.
     device = torch.device(params['device'])
     model = ReinforcemerRepacker(**params['model_params']).to(device)
+    if params['use_supervised_learning_weights']:
+        print("Loading model weights from supervised learning model:", params['model_input_weights_path'])
+        model.load_state_dict(torch.load(params['model_input_weights_path'], map_location=device))
     optimizer = torch.optim.Adam(model.parameters(), params['learning_rate'])
 
     # Load dataset
@@ -115,10 +128,8 @@ def main(params: dict) -> None:
     test_sampler = ClusteredDatasetSampler(protein_dataset, params, is_test_dataset_sampler=True)
     test_dataloader = DataLoader(protein_dataset, batch_sampler=test_sampler, collate_fn=collate_sampler_data, num_workers=params['num_workers'], persistent_workers=True)
 
-    # Training loop.
     epoch_num = -1
     for epoch_num in range(params['num_epochs']):
-
         # Train the model for an epoch.
         train_epoch_data = train_epoch(model, optimizer, train_dataloader, epoch_num, params)
 
@@ -135,7 +146,7 @@ def main(params: dict) -> None:
         # Log metadata to wandb.
         if not params['debug']:
             wandb.log(dict(epoch_data))
-        
+
         # Print training data to console.
         out = []
         for key, value in epoch_data.items():
@@ -146,17 +157,19 @@ def main(params: dict) -> None:
     if not params['debug']:
         torch.save(model.state_dict(), f"{params['weights_output_prefix']}_{epoch_num}.pt")
 
-
 if __name__ == "__main__":
     params = {
         'debug': (debug := False),
-        'weights_output_prefix': './model_weights/supervised_model_weights_teacher_forced_track_chi_acc_1',
+        'use_supervised_learning_weights': (use_pretrained_model := True),
+        'model_input_weights_path': ('./model_weights/supervised_model_weights_teacher_forced_99.pt' if use_pretrained_model else None),
+        'weights_output_prefix': './model_weights/reinforce_finetuned_from_tf_99_lr_1en6',
         'num_workers': 2,
         'num_epochs': 100,
         'batch_size': 10_000,
-        'learning_rate': 1e-3,
+        'max_clash_penalty': 1,
+        'learning_rate': 1e-6,
         'training_noise': 0.05,
-        'sample_randomly': True,
+        'sample_randomly': False,
         'train_splits_path': ('./files/train_splits_debug.pt' if debug else './files/train_splits.pt'),
         'test_splits_path': ('./files/test_splits_debug.pt' if debug else './files/test_splits.pt'),
         'model_params': {
@@ -170,7 +183,7 @@ if __name__ == "__main__":
             'knn_graph_k': 24,
             'rbf_encoding_params': {'num_bins': 50, 'bin_min': 0.0, 'bin_max': 20.0},
         },
-        'device': 'cuda:1',
+        'device': 'cuda:3',
         'dataset_path': '/scratch/bfry/torch_bioasmb_dataset' + ('/w7' if debug else ''),
         'clustering_output_prefix': 'torch_bioas_cluster30',
         'clustering_output_path': (output_path := '/scratch/bfry/bioasmb_dataset_sequence_clustering/'),

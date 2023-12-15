@@ -134,7 +134,7 @@ amino_acid_to_atom_identity_matrix = torch.zeros(20, 15, dtype=torch.long)
 for aa, atom_list in dataset_atom_order.items():
     if aa == 'X':
         continue
-    amino_acid_to_atom_identity_matrix[aa_long_to_idx[aa_short_to_long[aa]]] = torch.tensor([ATOM_IDENTITY_ENUM.index(atom_list[idx][0]) if idx < idx < len(atom_list) and atom_list[idx][0] in ATOM_IDENTITY_ENUM else ATOM_IDENTITY_ENUM.index("Padding") for idx in range(15)])
+    amino_acid_to_atom_identity_matrix[aa_long_to_idx[aa_short_to_long[aa]]] = torch.tensor([ATOM_IDENTITY_ENUM.index(atom_list[idx][0]) if idx < len(atom_list) and atom_list[idx][0] in ATOM_IDENTITY_ENUM else ATOM_IDENTITY_ENUM.index("Padding") for idx in range(15)])
 
 hbond_candidate_indices = torch.tensor([aa_long_to_idx[aa_short_to_long[x]] for x,y in dataset_atom_order.items() if any(atom[0] in HBOND_CAPABLE_ELEMENTS for atom in y[4:])])
 hbond_candidate_set = {aa_idx_to_short[x] for x in hbond_candidate_indices.tolist()}

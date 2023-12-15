@@ -1,7 +1,9 @@
 import torch
 import torch.nn.functional as F
+from torch_scatter import scatter
 import numpy as np
-from .constants import aa_long_to_idx, ATOM_IDENTITY_ENUM, DISULFIDE_S_CLASH_DIST, OTHER_ATOM_CLASH_DIST, clash_matrix, aa_idx_to_short, HARD_CLASH_TOLERANCE,  amino_acid_to_atom_identity_matrix,  hbond_mask_dict, hbond_element_dict ,HBOND_CAPABLE_ELEMENTS, HBOND_MAX_DISTANCE, HBOND_MAX_DISTANCE, ON_TO_S_HBOND_MAX_DISTANCE, S_TO_S_HBOND_MAX_DISTANCE, hbond_candidate_indices
+from .constants import aa_long_to_idx, ATOM_IDENTITY_ENUM, DISULFIDE_S_CLASH_DIST, OTHER_ATOM_CLASH_DIST, clash_matrix, aa_idx_to_short, HARD_CLASH_TOLERANCE,  amino_acid_to_atom_identity_matrix,  hbond_mask_dict, hbond_element_dict ,HBOND_CAPABLE_ELEMENTS, HBOND_MAX_DISTANCE, HBOND_MAX_DISTANCE, ON_TO_S_HBOND_MAX_DISTANCE, S_TO_S_HBOND_MAX_DISTANCE, hbond_candidate_indices, aa_short_to_idx
+
 
 SOFT_CLASH_THRESHOLD = 2.5
     
@@ -36,7 +38,7 @@ def clash_loss_penalty(distances, residue_types_source, residue_types_sink, atom
     penalties.clamp_(min=0.0)
 
     # Mask tracking which atom-atom distances are backbone-backbone. the rest are backbone-sidechain and sidechain-sidechain.
-    not_backbone_backbone_mask = torch.ones(15, 15, device=distances.device, dtype=torch.bool)
+    not_backbone_backbone_mask = torch.ones(15, 15, dtype=torch.bool, device=distances.device)
     not_backbone_backbone_mask[:5, :5] = False
 
     # Convert NaN values to 0.0, resulting (E, 200) tensor of pairwise distances between all relevant atoms in the two residues.
@@ -54,20 +56,23 @@ def compute_pairwise_clash_penalties(orig_coords, designed_coords, bb_bb_eidx, b
     Applies clash_loss_penalty function to every pairwise distance to compute the penalty for each pair of residues. 
     Takes the smallest distance implicated in the clash as the penalty for the pair of residues and sums this over all clashes for total penalty.
     """
+
+    # Treat X residues as glycine for the purposes of computing clashes.
+    index_clone = bb_label_indices.clone()
+    index_clone[index_clone == aa_short_to_idx['X']] = aa_short_to_idx['G']
+
     aa_to_atom_identity = amino_acid_to_atom_identity_matrix.to(designed_coords.device)
 
-    # Mask tracking self-edges in the KNN graph.  Use to only look at edges between different residues.
-    residue_indices = torch.arange(designed_coords.shape[0], device=designed_coords.device)
-    same_residue_mask = residue_indices[bb_bb_eidx[0]] == residue_indices[bb_bb_eidx[1]]
-    neighbor_eidces = bb_bb_eidx[:, ~same_residue_mask]
+    # Drop self-interactions from the graph so we dont clash with ourselves.
+    neighbor_eidces = bb_bb_eidx[:, bb_bb_eidx[0] != bb_bb_eidx[1]]
 
     # For each pair of interactions in neighbor_eidces, compute the distance between all atoms in the two residues.
     source_coords = orig_coords[neighbor_eidces[0]]
     sink_coords = designed_coords[neighbor_eidces[1]]
 
     # Get indexed representations of the atom types involved in each pairwise distance that will be computed to threshold what defines a clash.
-    residue_types_source = bb_label_indices[neighbor_eidces[0]]
-    residue_types_sink = bb_label_indices[neighbor_eidces[1]]
+    residue_types_source = index_clone[neighbor_eidces[0]]
+    residue_types_sink = index_clone[neighbor_eidces[1]]
     atom_types_source = aa_to_atom_identity[residue_types_source]
     atom_types_sink = aa_to_atom_identity[residue_types_sink]
 
@@ -80,11 +85,13 @@ def compute_pairwise_clash_penalties(orig_coords, designed_coords, bb_bb_eidx, b
     # Take the highest clash penalty computed for two atoms in each residue pair and sum over all residue pairs.
     clash_penalties = clash_penalties.amax(dim=1)
 
+    # Average the clash penalty over neighborhood.
+    output = scatter(clash_penalties, neighbor_eidces[1], dim=0, reduce='mean', dim_size=designed_coords.shape[0])
 
     if return_residue_indices:
-        return clash_penalties, neighbor_eidces
+        return output, neighbor_eidces
     
-    return clash_penalties
+    return output
 
 def compute_rotamer_clash_penalty(placed_aligned_rotamers, bb_bb_eidx, bb_label_indices, penalty_max=100):
     """

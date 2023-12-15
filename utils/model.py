@@ -61,7 +61,7 @@ class ReinforcemerRepacker(nn.Module):
         chi_logits = torch.zeros(batch.backbone_coords.shape[0], 4, self.rotamer_builder.num_chi_bins, dtype=batch.chi_angles.dtype, device=batch.chi_angles.device)
 
         # Use sequence embeddings as initial embeddings for node message passing.
-        bb_nodes = self.sequence_index_embedding_layer(batch.sequence_indices.long())
+        bb_nodes = self.sequence_index_embedding_layer(batch.sequence_indices)
 
         # Encode the edge distances.
         edge_attrs = self.edge_distance_encoding_module(batch.edge_distance).flatten(start_dim=1)
