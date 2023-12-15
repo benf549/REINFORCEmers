@@ -19,7 +19,7 @@ def compute_reinforce_loss(log_prob_action, reward):
     """
     Define the simplest REINFORCE loss we can optimize with gradient descent.
     """
-    return -log_prob_action * reward
+    return -1 * log_prob_action * reward
 
 
 def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.Adam], dataloader: DataLoader, epoch_num: int, params: dict):
@@ -62,13 +62,14 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
         log_prob_action = log_prob_action[valid_residue_mask]
 
         # Compute reward for each sampled chi angle.
-        with torch.no_grad():
-            designed_coords = model.rotamer_builder.build_rotamers(batch.backbone_coords, sampled_chi_angles, batch.sequence_indices)
-            ground_truth_coords = model.rotamer_builder.build_rotamers(batch.backbone_coords, batch.chi_angles, batch.sequence_indices)
-            reward = -1 * compute_pairwise_clash_penalties(ground_truth_coords, designed_coords, batch.edge_index, batch.sequence_indices, penalty_max=params['max_clash_penalty'])
-            reward = reward[valid_residue_mask].unsqueeze(-1).expand(-1, 4)
+        designed_coords = model.rotamer_builder.build_rotamers(batch.backbone_coords, sampled_chi_angles, batch.sequence_indices)
+        ground_truth_coords = model.rotamer_builder.build_rotamers(batch.backbone_coords, batch.chi_angles, batch.sequence_indices)
 
+        # Reward is negative of posiitive penalties.
+        reward = -1 * compute_pairwise_clash_penalties(ground_truth_coords, designed_coords, batch.edge_index, batch.sequence_indices, penalty_max=params['max_clash_penalty'])
+        reward = reward[valid_residue_mask].unsqueeze(-1).expand(-1, 4)
 
+        # Compute REINFORCE loss.
         loss = compute_reinforce_loss(log_prob_action[chi_mask], reward[chi_mask]).sum()
         loss = loss / max(chi_mask.any(dim=1).sum().item(), 1)
 
@@ -84,10 +85,12 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
 
         # Log debug information.
         epoch_data['loss'] += loss.item()
+        epoch_data['reward'] += reward.sum().item()
         epoch_data['num_samples'] += chi_mask.any(dim=1).sum().item() # Track number of residues that have at least one valid chi angle.
 
     # Average loss over all samples.
     epoch_data['loss'] /= max(epoch_data['num_samples'], 1)
+    epoch_data['reward'] /= max(epoch_data['num_samples'], 1)
     epoch_list_data = {x: sum(y) / max(len(y), 1) for x,y in epoch_list_data.items()}
     return {**epoch_data, **epoch_list_data}
 
@@ -112,10 +115,12 @@ def main(params: dict) -> None:
     # Initialize device, model, and optimmizer for gradient descent.
     device = torch.device(params['device'])
     model = ReinforcemerRepacker(**params['model_params']).to(device)
+
     if params['use_supervised_learning_weights']:
         print("Loading model weights from supervised learning model:", params['model_input_weights_path'])
         model.load_state_dict(torch.load(params['model_input_weights_path'], map_location=device))
-    optimizer = torch.optim.Adam(model.parameters(), params['learning_rate'])
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=params['learning_rate'])
 
     # Load dataset
     protein_dataset = UnclusteredProteinChainDataset(params)
@@ -161,18 +166,19 @@ if __name__ == "__main__":
     params = {
         'debug': (debug := False),
         'use_supervised_learning_weights': (use_pretrained_model := True),
-        'model_input_weights_path': ('./model_weights/supervised_model_weights_teacher_forced_99.pt' if use_pretrained_model else None),
-        'weights_output_prefix': './model_weights/reinforce_finetuned_from_tf_99_lr_1en6',
+        'model_input_weights_path': ('./model_weights/supervised_model_weights_teacher_forced_track_chi_acc_1_80.pt' if use_pretrained_model else None),
+        'weights_output_prefix': './model_weights/reinforce_finetuned_from_best_backprop_reward_1em7_no_train_tf_1',
         'num_workers': 2,
         'num_epochs': 100,
         'batch_size': 10_000,
         'max_clash_penalty': 1,
-        'learning_rate': 1e-6,
+        'learning_rate': 1e-8,
         'training_noise': 0.05,
-        'sample_randomly': False,
+        'sample_randomly': True,
         'train_splits_path': ('./files/train_splits_debug.pt' if debug else './files/train_splits.pt'),
         'test_splits_path': ('./files/test_splits_debug.pt' if debug else './files/test_splits.pt'),
         'model_params': {
+            'disable_teacher_forcing': True,
             'dropout': 0.1,
             'chi_angle_rbf_bin_width': 5,
             'node_embedding_dim': 128,
@@ -180,10 +186,11 @@ if __name__ == "__main__":
             'num_encoder_layers': 3,
             'num_attention_heads': 3,
             'use_mean_attention_aggr': True,
+            'use_dense_chi_layer': False,
             'knn_graph_k': 24,
             'rbf_encoding_params': {'num_bins': 50, 'bin_min': 0.0, 'bin_max': 20.0},
         },
-        'device': 'cuda:3',
+        'device': 'cuda:2',
         'dataset_path': '/scratch/bfry/torch_bioasmb_dataset' + ('/w7' if debug else ''),
         'clustering_output_prefix': 'torch_bioas_cluster30',
         'clustering_output_path': (output_path := '/scratch/bfry/bioasmb_dataset_sequence_clustering/'),

@@ -9,9 +9,11 @@ from typing import Tuple
 class ReinforcemerRepacker(nn.Module):
     def __init__(
         self, node_embedding_dim: int, edge_embedding_dim: int, num_encoder_layers: int, 
-        dropout: float, rbf_encoding_params: dict, **kwargs
+        dropout: float, rbf_encoding_params: dict, use_dense_chi_layer: bool, disable_teacher_forcing: bool = False, **kwargs
     ) -> None:
         super(ReinforcemerRepacker, self).__init__()
+
+        self.disable_teacher_forcing = disable_teacher_forcing
 
         self.node_embedding_dim = node_embedding_dim
         self.edge_embedding_dim = edge_embedding_dim
@@ -36,12 +38,21 @@ class ReinforcemerRepacker(nn.Module):
 
         # Chi prediction layers.
         chi_edge_input_dim = (node_embedding_dim * 2) + self.chi_embedding_dim
-        self.chi_prediction_layers = nn.ModuleList([
-            ChiPredictionLayer(chi_edge_input_dim, self.rotamer_builder.num_chi_bins, node_embedding_dim, edge_embedding_dim, dropout, **kwargs),
-            ChiPredictionLayer(chi_edge_input_dim + self.rotamer_builder.num_chi_bins, self.rotamer_builder.num_chi_bins, node_embedding_dim, edge_embedding_dim, dropout, **kwargs),
-            ChiPredictionLayer(chi_edge_input_dim + (2 * self.rotamer_builder.num_chi_bins), self.rotamer_builder.num_chi_bins, node_embedding_dim, edge_embedding_dim, dropout, **kwargs),
-            ChiPredictionLayer(chi_edge_input_dim + (3 * self.rotamer_builder.num_chi_bins), self.rotamer_builder.num_chi_bins, node_embedding_dim, edge_embedding_dim, dropout, **kwargs),
-        ])
+        self.use_dense_chi_layer = use_dense_chi_layer
+        if self.use_dense_chi_layer:
+            self.chi_prediction_layers = nn.ModuleList([
+                ChiPredictionLayer(chi_edge_input_dim, self.rotamer_builder.num_chi_bins, node_embedding_dim, edge_embedding_dim, dropout, **kwargs),
+                DenseChiLayer(node_embedding_dim, self.rotamer_builder.num_chi_bins, 1, dropout),
+                DenseChiLayer(node_embedding_dim, self.rotamer_builder.num_chi_bins, 2, dropout),
+                DenseChiLayer(node_embedding_dim, self.rotamer_builder.num_chi_bins, 3, dropout),
+            ])
+        else:
+            self.chi_prediction_layers = nn.ModuleList([
+                ChiPredictionLayer(chi_edge_input_dim, self.rotamer_builder.num_chi_bins, node_embedding_dim, edge_embedding_dim, dropout, **kwargs),
+                ChiPredictionLayer(chi_edge_input_dim + self.rotamer_builder.num_chi_bins, self.rotamer_builder.num_chi_bins, node_embedding_dim, edge_embedding_dim, dropout, **kwargs),
+                ChiPredictionLayer(chi_edge_input_dim + (2 * self.rotamer_builder.num_chi_bins), self.rotamer_builder.num_chi_bins, node_embedding_dim, edge_embedding_dim, dropout, **kwargs),
+                ChiPredictionLayer(chi_edge_input_dim + (3 * self.rotamer_builder.num_chi_bins), self.rotamer_builder.num_chi_bins, node_embedding_dim, edge_embedding_dim, dropout, **kwargs),
+            ])
 
     @property
     def device(self) -> torch.device:
@@ -73,17 +84,29 @@ class ReinforcemerRepacker(nn.Module):
 
         # If run with model.eval(), will not use teacher forcing for chi angle prediction.
         use_teacher_force = False
-        if self.training:
+        if self.training and not self.disable_teacher_forcing:
             use_teacher_force = True
 
         # Autoregressively predict chi angles.
         prev_chi = torch.empty((bb_nodes.shape[0], 0), dtype=batch.chi_angles.dtype, device=bb_nodes.device)
-        for chi_layer in self.chi_prediction_layers:
-            chi_index = prev_chi.shape[1] // self.rotamer_builder.num_chi_bins
-            prev_chi, chi_idx_logits, sampled_chi_angle = chi_layer(batch, bb_nodes, prev_chi, edge_attrs, self.rotamer_builder, use_teacher_force)
+        if self.use_dense_chi_layer:
 
-            sampled_chi_angles[:, chi_index] = sampled_chi_angle
-            chi_logits[:, chi_index] = chi_idx_logits
+            # Use GAT to compute first chi angle and bb_nodes update.
+            prev_chi, chi_idx_logits, sampled_chi_angle, bb_nodes = self.chi_prediction_layers[0](batch, bb_nodes, prev_chi, edge_attrs, self.rotamer_builder, use_teacher_force)
+            sampled_chi_angles[:, 0] = sampled_chi_angle
+            chi_logits[:, 0] = chi_idx_logits
+
+            # Use remaining dense layers to compute chi angles from previous chi angles and bb_nodes.
+            for chi_idx, dense_layer in enumerate(self.chi_prediction_layers[1:]):
+                prev_chi, chi_idx_logits, sampled_chi_angle, bb_nodes = dense_layer(bb_nodes, prev_chi, batch.chi_angles, use_teacher_force, self.rotamer_builder)
+                sampled_chi_angles[:, chi_idx + 1] = sampled_chi_angle
+                chi_logits[:, chi_idx + 1] = chi_idx_logits
+        else:
+            for chi_layer in self.chi_prediction_layers:
+                chi_index = prev_chi.shape[1] // self.rotamer_builder.num_chi_bins
+                prev_chi, chi_idx_logits, sampled_chi_angle, _ = chi_layer(batch, bb_nodes, prev_chi, edge_attrs, self.rotamer_builder, use_teacher_force)
+                sampled_chi_angles[:, chi_index] = sampled_chi_angle
+                chi_logits[:, chi_index] = chi_idx_logits
 
         # Returns the predicted chi angle logits as (N, 4, num_chi_bins) tensor.
         return chi_logits, sampled_chi_angles
@@ -217,7 +240,7 @@ class ChiPredictionLayer(nn.Module):
     """
     def __init__(
         self, input_dimension: int, output_dimension: int, node_embedding_dim: int, 
-        edge_embedding_dim: int, dropout: float, num_attention_heads: int, use_mean_attention_aggr: bool, 
+        edge_embedding_dim: int, dropout: float,  num_attention_heads: int, use_mean_attention_aggr: bool,
         **kwargs
     ) -> None:
         """
@@ -261,7 +284,7 @@ class ChiPredictionLayer(nn.Module):
     def forward(
         self, batch: BatchData, bb_nodes: torch.Tensor, prev_chi: torch.Tensor, 
         edge_attrs: torch.Tensor, rotamer_builder: RotamerBuilder, teacher_force: bool = True
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple:
 
         # Drop self-edges from graph so we don't provide the chi angle that we are predicting.
         self_edge_mask = batch.edge_index[0] == batch.edge_index[1] # type: ignore
@@ -324,4 +347,39 @@ class ChiPredictionLayer(nn.Module):
         else:
             encoded_chi_angle = rotamer_builder.compute_binned_degree_basis_function(predicted_chi_angle.unsqueeze(-1)).nan_to_num().squeeze(1)
 
-        return torch.cat([prev_chi, encoded_chi_angle], dim=1), predicted_chi_logits, predicted_chi_angle
+        return torch.cat([prev_chi, encoded_chi_angle], dim=1), predicted_chi_logits, predicted_chi_angle, bb_nodes
+
+
+class DenseChiLayer(nn.Module):
+    def __init__(self, node_embedding_dim, num_chi_bins, chi_idx, dropout, **kwargs):
+        super(DenseChiLayer, self).__init__()
+
+        self.update_nodes = nn.Sequential(
+            nn.Linear(node_embedding_dim + (num_chi_bins * chi_idx), node_embedding_dim),
+            nn.GELU(),
+            nn.Linear(node_embedding_dim, node_embedding_dim),
+            nn.GELU(),
+            nn.Linear(node_embedding_dim, node_embedding_dim),
+        )
+
+        self.gelu = nn.GELU()
+        self.output_linear = nn.Linear(node_embedding_dim, num_chi_bins)
+        self.chi_idx = chi_idx
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, bb_nodes, prev_chi, true_chi, teacher_force, rotamer_builder):
+
+        # Compute next chi angle.
+        bb_nodes = self.update_nodes(torch.cat([bb_nodes, prev_chi], dim=1))
+        predicted_chi_logits = self.output_linear(self.gelu(bb_nodes))
+
+        predicted_chi_idx = predicted_chi_logits.argmax(dim=-1)
+        predicted_chi_angle = rotamer_builder.index_to_degree_bin[predicted_chi_idx]
+
+        if teacher_force:
+            ground_truth_chi_angle = true_chi[:, self.chi_idx]
+            encoded_chi_angle = rotamer_builder.compute_binned_degree_basis_function(ground_truth_chi_angle.unsqueeze(-1)).nan_to_num().squeeze(1)
+        else:
+            encoded_chi_angle = rotamer_builder.compute_binned_degree_basis_function(predicted_chi_angle.unsqueeze(-1)).nan_to_num().squeeze(1)
+
+        return torch.cat([prev_chi, encoded_chi_angle], dim=1), predicted_chi_logits, predicted_chi_angle, bb_nodes

@@ -93,7 +93,7 @@ def main(params):
     # Set the model weights
     device = torch.device(params['device'])
     model = ReinforcemerRepacker(**params['model_params']).to(device)
-    model_weights = torch.load(params['weights_input_prefix'] + '_60.pt', map_location=device)
+    model_weights = torch.load(params['weights_input_prefix'] + '_5.pt', map_location=device)
     model.load_state_dict(model_weights)
     
     # Load test data.
@@ -116,18 +116,18 @@ def main(params):
         all_repacked_proteins.extend(atom_group_dict['repacked'])
 
     for idx in range(len(all_ground_truth_proteins)):
-        pr.writePDB(f'./jerry_test_proteins/ground_truth/{idx:05}.pdb', all_ground_truth_proteins[idx])
-        pr.writePDB(f'./jerry_test_proteins/repacked/{idx:05}.pdb', all_repacked_proteins[idx])
+        pr.writePDB(f'./debug/ground_truth/{idx:05}.pdb', all_ground_truth_proteins[idx])
+        pr.writePDB(f'./debug/repacked/{idx:05}.pdb', all_repacked_proteins[idx])
         
 
 if __name__ == "__main__":
+    torch.set_num_threads(10)
     params = {
-        'debug': (debug := False),
-        'weights_input_prefix': './model_weights/supervised_model_weights_teacher_forced',
+        'debug': (debug := True),
+        'weights_input_prefix': './model_weights/reinforce_finetuned_from_best_backprop_reward',
         'num_workers': 2,
         'num_epochs': 100,
         'batch_size': 10_000,
-        'learning_rate': 1e-4,
         'sample_randomly': False,
         'train_splits_path': ('./files/train_splits_debug.pt' if debug else './files/train_splits.pt'),
         'test_splits_path': ('./files/test_splits_debug.pt' if debug else './files/test_splits.pt'),
@@ -139,6 +139,7 @@ if __name__ == "__main__":
             'num_encoder_layers': 3,
             'num_attention_heads': 3,
             'use_mean_attention_aggr': True,
+            'use_dense_chi_layer': False,
             'knn_graph_k': 24,
             'rbf_encoding_params': {'num_bins': 50, 'bin_min': 0.0, 'bin_max': 20.0},
         },

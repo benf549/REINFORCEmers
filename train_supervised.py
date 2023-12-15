@@ -150,7 +150,7 @@ def main(params: dict) -> None:
 if __name__ == "__main__":
     params = {
         'debug': (debug := False),
-        'weights_output_prefix': './model_weights/supervised_model_weights_teacher_forced_track_chi_acc_1',
+        'weights_output_prefix': './model_weights/supervised_dense_chi',
         'num_workers': 2,
         'num_epochs': 100,
         'batch_size': 10_000,
@@ -167,10 +167,11 @@ if __name__ == "__main__":
             'num_encoder_layers': 3,
             'num_attention_heads': 3,
             'use_mean_attention_aggr': True,
+            'use_dense_chi_layer': True,
             'knn_graph_k': 24,
             'rbf_encoding_params': {'num_bins': 50, 'bin_min': 0.0, 'bin_max': 20.0},
         },
-        'device': 'cuda:1',
+        'device': 'cuda:5',
         'dataset_path': '/scratch/bfry/torch_bioasmb_dataset' + ('/w7' if debug else ''),
         'clustering_output_prefix': 'torch_bioas_cluster30',
         'clustering_output_path': (output_path := '/scratch/bfry/bioasmb_dataset_sequence_clustering/'),
