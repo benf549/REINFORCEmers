@@ -30,14 +30,14 @@ class BatchData():
     edge_index: Optional[torch.Tensor] = None
     edge_distance: Optional[torch.Tensor] = None
 
-    def construct_graph(self) -> None:
+    def construct_graph(self, training_noise) -> None:
         """
         Computes a KNN graph using CA coordinates and distances between all pairs of atoms.
         Stores the edge_index and edge_distance tensors in the BatchData object.
         """
         self.edge_index = knn_graph(self.backbone_coords[:, 1], k=10, batch=self.batch_indices, loop=True)
-        # TODO: perturb coordinates with noise when building edge distances.
-        self.edge_distance = torch.cdist(self.backbone_coords[self.edge_index[0]], self.backbone_coords[self.edge_index[1]]).flatten(start_dim=1)
+        noised_backbone_coords = self.backbone_coords + (training_noise * torch.randn_like(self.backbone_coords))
+        self.edge_distance = torch.cdist(noised_backbone_coords[self.edge_index[0]], noised_backbone_coords[self.edge_index[1]]).flatten(start_dim=1)
     
     def to_device(self, device: torch.device) -> None:
         """
@@ -142,7 +142,6 @@ def collate_sampler_data(data: list) -> BatchData:
     
     # Create a BatchData object and compute the KNN graph.
     output_batch_data = BatchData(**outputs)
-    output_batch_data.construct_graph()
 
     return output_batch_data
 

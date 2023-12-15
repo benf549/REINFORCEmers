@@ -50,10 +50,15 @@ class ReinforcemerRepacker(nn.Module):
         """
         return next(self.parameters()).device
 
-    def forward(self, batch: BatchData) -> torch.Tensor:
+    def forward(self, batch: BatchData) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Given a BatchData object predicts the chi angles of every protein residue.
+            If teacher_force is true, then the ground truth chi angles are used in autoregressive prediction.
+        """
 
-        # Store the chi angles actually predicted by the model.
-        output_chi_angles = torch.zeros(batch.backbone_coords.shape[0], 4, self.rotamer_builder.num_chi_bins, dtype=batch.chi_angles.dtype, device=batch.chi_angles.device)
+        # Output tensors.
+        sampled_chi_angles = torch.zeros(*batch.chi_angles.shape, dtype=batch.chi_angles.dtype, device=batch.chi_angles.device)
+        chi_logits = torch.zeros(batch.backbone_coords.shape[0], 4, self.rotamer_builder.num_chi_bins, dtype=batch.chi_angles.dtype, device=batch.chi_angles.device)
 
         # Use sequence embeddings as initial embeddings for node message passing.
         bb_nodes = self.sequence_index_embedding_layer(batch.sequence_indices.long())
@@ -66,13 +71,22 @@ class ReinforcemerRepacker(nn.Module):
         for encoder_layer in self.encoder_layers:
             bb_nodes, edge_attrs = encoder_layer(bb_nodes, batch.edge_index, edge_attrs)
 
+        # If run with model.eval(), will not use teacher forcing for chi angle prediction.
+        use_teacher_force = False
+        if self.training:
+            use_teacher_force = True
+
         # Autoregressively predict chi angles.
         prev_chi = torch.empty((bb_nodes.shape[0], 0), dtype=batch.chi_angles.dtype, device=bb_nodes.device)
         for chi_layer in self.chi_prediction_layers:
-            prev_chi = chi_layer(batch, bb_nodes, prev_chi, edge_attrs, self.rotamer_builder)
+            chi_index = prev_chi.shape[1] // self.rotamer_builder.num_chi_bins
+            prev_chi, chi_idx_logits, sampled_chi_angle = chi_layer(batch, bb_nodes, prev_chi, edge_attrs, self.rotamer_builder, use_teacher_force)
+
+            sampled_chi_angles[:, chi_index] = sampled_chi_angle
+            chi_logits[:, chi_index] = chi_idx_logits
 
         # Returns the predicted chi angle logits as (N, 4, num_chi_bins) tensor.
-        return prev_chi.reshape(-1, 4, self.rotamer_builder.num_chi_bins)
+        return chi_logits, sampled_chi_angles
     
 
 class EncoderModule(nn.Module):
@@ -247,7 +261,7 @@ class ChiPredictionLayer(nn.Module):
     def forward(
         self, batch: BatchData, bb_nodes: torch.Tensor, prev_chi: torch.Tensor, 
         edge_attrs: torch.Tensor, rotamer_builder: RotamerBuilder, teacher_force: bool = True
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
         # Drop self-edges from graph so we don't provide the chi angle that we are predicting.
         self_edge_mask = batch.edge_index[0] == batch.edge_index[1] # type: ignore
@@ -263,7 +277,7 @@ class ChiPredictionLayer(nn.Module):
         sink_edge_node_embeddings = bb_nodes[eidx_noself[1]]
 
         # Concatenate all the node and edge data.
-        prev_chi_exp = prev_chi[eidx_noself[0]]
+        prev_chi_exp = prev_chi[eidx_noself[1]]
         all_feats_concat = torch.cat([source_edge_node_embeddings, sink_edge_node_embeddings, source_edge_chi_angles, eattr_noself, prev_chi_exp], dim=1)
 
         # Compute GATv2 multi-head attention weights.
@@ -296,5 +310,19 @@ class ChiPredictionLayer(nn.Module):
         bb_nodes = self.node_norm1(bb_nodes + self.dropout(node_update))
 
         # Output the predicted chi angle probabilities.
-        predicted_chi = self.node_to_chi_output_layer(bb_nodes)
-        return torch.cat([prev_chi, predicted_chi], dim=1)
+        predicted_chi_logits = self.node_to_chi_output_layer(bb_nodes)
+
+        # If not teacher forcing, take the highest probability chi angle.
+        prediced_chi_idx = predicted_chi_logits.argmax(dim=-1)
+        predicted_chi_angle = rotamer_builder.index_to_degree_bin[prediced_chi_idx] # type: ignore
+
+        # If teacher forcing, take the ground truth chi angle and encode it for the next layer. Otherwise encode the predicted chi angle.
+        if teacher_force:
+            chi_index = prev_chi.shape[1] // rotamer_builder.num_chi_bins
+            ground_truth_chi_angle = batch.chi_angles[:, chi_index]
+            encoded_chi_angle = rotamer_builder.compute_binned_degree_basis_function(ground_truth_chi_angle.unsqueeze(-1)).nan_to_num().squeeze(1)
+        else:
+            encoded_chi_angle = rotamer_builder.compute_binned_degree_basis_function(predicted_chi_angle.unsqueeze(-1)).nan_to_num().squeeze(1)
+        ############
+
+        return torch.cat([prev_chi, encoded_chi_angle], dim=1), predicted_chi_logits, predicted_chi_angle

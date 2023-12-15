@@ -31,8 +31,9 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
         if is_train_epoch:
             optimizer.zero_grad()
 
-        # Move batch to device
+        # Move batch to device, build graph and perturb by noise if a train epoch to reduce overfitting.
         batch.to_device(model.device)
+        batch.construct_graph(params['training_noise'] if is_train_epoch else 0.0)
 
         # Compute training mask: residues that are not in contact with extra atoms and being trained on.
         valid_residue_mask = (~batch.extra_atom_contact_mask) & (~batch.chain_mask)
@@ -47,11 +48,19 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
             continue
 
         # Compute supervised learning loss over residues that are not in contact with extra atoms, step loss and optimize.
-        predicted_chi_angle_logits = model(batch)
+        chi_logits, sampled_chi_angles = model(batch)
+        # print(sampled_chi_angles, batch.chi_angles)
+        # bool_mask = torch.isclose(sampled_chi_angles, batch.chi_angles)
+        # min_indices = bool_mask.argmin(dim=1)
+        # raise NotImplementedError
         ground_truth_chi_angles = model.rotamer_builder.compute_binned_degree_basis_function(batch.chi_angles).nan_to_num()
-        predicted_chi_angle_logits = predicted_chi_angle_logits[valid_residue_mask]
+
+        chi_logits = chi_logits[valid_residue_mask]
         ground_truth_chi_angles = ground_truth_chi_angles[valid_residue_mask]
-        loss = F.cross_entropy(predicted_chi_angle_logits[chi_mask], ground_truth_chi_angles[chi_mask])
+
+        # Compute supervised learning loss.
+        loss = F.cross_entropy(chi_logits[chi_mask], ground_truth_chi_angles[chi_mask], reduction='sum')
+        loss /= max(chi_mask.any(dim=1).sum().item(), 1)
 
         # Step for gradient descent if optimizer is provided.
         if is_train_epoch:
@@ -137,11 +146,12 @@ def main(params: dict) -> None:
 if __name__ == "__main__":
     params = {
         'debug': (debug := False),
-        'weights_output_prefix': './model_weights/supervised_model_weights_tested_layer_aggr',
+        'weights_output_prefix': './model_weights/supervised_model_weights_teacher_forced',
         'num_workers': 2,
         'num_epochs': 100,
         'batch_size': 10_000,
         'learning_rate': 1e-4,
+        'training_noise': 0.05,
         'sample_randomly': True,
         'train_splits_path': ('./files/train_splits_debug.pt' if debug else './files/train_splits.pt'),
         'test_splits_path': ('./files/test_splits_debug.pt' if debug else './files/test_splits.pt'),
