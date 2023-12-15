@@ -45,7 +45,7 @@ def clash_loss_penalty(distances, residue_types_source, residue_types_sink, atom
     return penalties
 
 
-def compute_pairwise_clash_penalties(placed_aligned_rotamers, bb_bb_eidx, bb_label_indices, penalty_max=100, return_residue_indices=False):
+def compute_pairwise_clash_penalties(orig_coords, designed_coords, bb_bb_eidx, bb_label_indices, penalty_max=100, return_residue_indices=False):
     """
     Identifies residues involved in sidechain-sidechain and sidechain-backbone clashes for a batch of proteins with eachother.
 
@@ -54,16 +54,16 @@ def compute_pairwise_clash_penalties(placed_aligned_rotamers, bb_bb_eidx, bb_lab
     Applies clash_loss_penalty function to every pairwise distance to compute the penalty for each pair of residues. 
     Takes the smallest distance implicated in the clash as the penalty for the pair of residues and sums this over all clashes for total penalty.
     """
-    aa_to_atom_identity = amino_acid_to_atom_identity_matrix.to(placed_aligned_rotamers.device)
+    aa_to_atom_identity = amino_acid_to_atom_identity_matrix.to(designed_coords.device)
 
     # Mask tracking self-edges in the KNN graph.  Use to only look at edges between different residues.
-    residue_indices = torch.arange(placed_aligned_rotamers.shape[0], device=placed_aligned_rotamers.device)
+    residue_indices = torch.arange(designed_coords.shape[0], device=designed_coords.device)
     same_residue_mask = residue_indices[bb_bb_eidx[0]] == residue_indices[bb_bb_eidx[1]]
     neighbor_eidces = bb_bb_eidx[:, ~same_residue_mask]
 
     # For each pair of interactions in neighbor_eidces, compute the distance between all atoms in the two residues.
-    source_coords = placed_aligned_rotamers[neighbor_eidces[0]]
-    sink_coords = placed_aligned_rotamers[neighbor_eidces[1]]
+    source_coords = orig_coords[neighbor_eidces[0]]
+    sink_coords = designed_coords[neighbor_eidces[1]]
 
     # Get indexed representations of the atom types involved in each pairwise distance that will be computed to threshold what defines a clash.
     residue_types_source = bb_label_indices[neighbor_eidces[0]]
@@ -71,7 +71,7 @@ def compute_pairwise_clash_penalties(placed_aligned_rotamers, bb_bb_eidx, bb_lab
     atom_types_source = aa_to_atom_identity[residue_types_source]
     atom_types_sink = aa_to_atom_identity[residue_types_sink]
 
-    clash_matrix_dev = clash_matrix.to(placed_aligned_rotamers.device)
+    clash_matrix_dev = clash_matrix.to(designed_coords.device)
 
     # (E, 15, 15) tensor of pairwise distances between all atoms in the two residues.
     clash_penalties = torch.cdist(source_coords, sink_coords)
@@ -210,7 +210,7 @@ def compute_hbond_reward(coords: torch.Tensor, bb_label_indices: torch.Tensor, d
 def compute_reward(coords: torch.Tensor, bb_bb_eidx: torch.Tensor, bb_label_indices: torch.Tensor):
 
     #compute clash and hbond contributions to reward
-    clash_penalty = compute_rotamer_clash_penalty(coords, bb_bb_eidx, bb_label_indices).item()
+    clash_penalty = compute_rotamer_clash_penalty(coords, bb_bb_eidx, bb_labcel_indices).item()
     hbond_reward = compute_hbond_reward(coords, bb_label_indices).item()
 
     #scale reward terms by max contribution
