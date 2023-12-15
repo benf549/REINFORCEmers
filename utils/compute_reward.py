@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from .constants import aa_long_to_idx, ATOM_IDENTITY_ENUM, DISULFIDE_S_CLASH_DIST, OTHER_ATOM_CLASH_DIST, clash_matrix, aa_idx2aa_name, HARD_CLASH_TOLERANCE,  amino_acid_to_atom_identity_matrix,  hbond_mask_dict, hbond_element_dict ,HBOND_CAPABLE_ELEMENTS, HBOND_MAX_DISTANCE, HBOND_MAX_DISTANCE, ON_TO_S_HBOND_MAX_DISTANCE, S_TO_S_HBOND_MAX_DISTANCE, hbond_candidate_indices
+from .constants import aa_long_to_idx, ATOM_IDENTITY_ENUM, DISULFIDE_S_CLASH_DIST, OTHER_ATOM_CLASH_DIST, clash_matrix, aa_idx_to_short, HARD_CLASH_TOLERANCE,  amino_acid_to_atom_identity_matrix,  hbond_mask_dict, hbond_element_dict ,HBOND_CAPABLE_ELEMENTS, HBOND_MAX_DISTANCE, HBOND_MAX_DISTANCE, ON_TO_S_HBOND_MAX_DISTANCE, S_TO_S_HBOND_MAX_DISTANCE, hbond_candidate_indices
 
 SOFT_CLASH_THRESHOLD = 2.5
     
@@ -125,7 +125,7 @@ def identify_sidechain_hydrogen_bonding_coordinates(hbond_capable_coords, hbond_
     padded_sc_coords = []
     atom_element_list = []
     for idx, aa_label_idx in enumerate(label_indices[hbond_candidate_mask].cpu().tolist()):
-        residue_name = aa_idx2aa_name[aa_label_idx]
+        residue_name = aa_idx_to_short[aa_label_idx]
         padded_sc_coords.append(pad_matrix_with_nan(hbond_capable_coords[idx, hbond_mask_dict[residue_name]], 3, last_dim=False))
         sc_hbonding_atom_elements = hbond_element_dict[residue_name]
 

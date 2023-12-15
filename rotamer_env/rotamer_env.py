@@ -3,29 +3,26 @@ import gym
 import torch
 from gym import spaces
 from utils.compute_reward import compute_reward
+from IPython import embed
 
-
-class rotamerEnv(gym.Env):
+class rotamer_env(gym.Env):
     #makes sure environment doesn't render
     metadata = {"render_modes": None, "render_fps": None}
     num_bins = 72
 
-    def __init__(self, size, render_mode=None):
+    def __init__(self, size=10, render_mode=None):
         
         #Define state space. There are 5 states, 1-4 corresponding to the current rotamer to decode, and 5 as a terminal state
-        self.observation_space = spaces.Dict(
-            "agent": spaces.Discrete(5, dtype=int),
-        )
+        self.observation_space = spaces.Dict({"agent" : spaces.Discrete(5)})
 
         #Define action space. There are 72 bins, corresponding to 72 rotameric bins
-        self.action_space = spaces.Tuple(tuple(spaces.Discrete(72) for _ in range(size)), dtype=int)
-
+        self.action_space = spaces.Tuple(tuple([spaces.Discrete(72) for _ in range(size)]))
     def _get_obs(self):
         return {"agent": self._agent_location}
     
+    #TODO: could return other info, just redundant for now
     def _get_info(self):
-        raise NotImplementedError
-    
+        return {"agent": self._agent_location}
 
     def reset(self, seed = None, options = None):
         super().reset(seed = seed)
@@ -35,7 +32,7 @@ class rotamerEnv(gym.Env):
 
         observation = self._get_obs()
 
-        return observation
+        return observation, self._get_info()
     
     def step(self, action, coords: torch.Tensor, bb_bb_eidx: torch.Tensor, bb_label_indices: torch.Tensor):
         #finds first location of NaN which corresponds to the next rotamer to decode
@@ -51,4 +48,3 @@ class rotamerEnv(gym.Env):
         observation = self._get_obs()
 
         return observation, reward, terminated
-    

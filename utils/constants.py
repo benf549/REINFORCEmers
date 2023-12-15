@@ -6,9 +6,18 @@ parent_path = Path(__file__).parent.absolute()
 
 # Define distance that will be used to create a mask for residues.
 EXTRA_ATOM_CONTACT_DISTANCE = 5.0
+ON_TO_S_HBOND_MAX_DISTANCE = 4.2
+S_TO_S_HBOND_MAX_DISTANCE = 4.5
+HBOND_MAX_DISTANCE = 3.5
+ATOM_IDENTITY_ENUM = ['C', 'O', 'N', 'S', 'metal', 'other', 'Padding']
+HBOND_CAPABLE_ELEMENTS = ('N', 'O', 'S', 'Padding')
+DISULFIDE_S_CLASH_DIST = 1.8
+OTHER_ATOM_CLASH_DIST = 2.7
+METAL_CLASH_DIST = 1.5
 MAX_PEPTIDE_LENGTH = 40
 NUM_CB_ATOMS_FOR_BURIAL = 16
 CHI_BIN_MIN, CHI_BIN_MAX = -180, 180
+HARD_CLASH_TOLERANCE = 0.2
 
 # Map of canonical amino acid 1 to 3 letter codes.
 aa_short_to_long = {'C': 'CYS', 'D': 'ASP', 'S': 'SER', 'Q': 'GLN', 'K': 'LYS', 'I': 'ILE', 'P': 'PRO', 'T': 'THR', 'F': 'PHE', 'N': 'ASN', 'G': 'GLY', 'H': 'HIS', 'L': 'LEU', 'R': 'ARG', 'W': 'TRP', 'A': 'ALA', 'V': 'VAL', 'E': 'GLU', 'Y': 'TYR', 'M': 'MET', 'X': 'XAA'}
@@ -17,6 +26,17 @@ aa_long_to_idx = {'ALA': 0, 'ARG': 1, 'ASN': 2, 'ASP': 3, 'CYS': 4, 'GLU': 5, 'G
 aa_short_to_idx = {x: aa_long_to_idx[y] for x, y in aa_short_to_long.items()}
 aa_idx_to_long = {x: y for y, x in aa_long_to_idx.items()}
 aa_idx_to_short = {x: aa_long_to_short[y] for x, y in aa_idx_to_long.items()}
+
+clash_matrix = torch.tensor([
+    #  C,   O,   N,   S, metals, other
+    [3.4, 3.0, 3.0, 3.4, METAL_CLASH_DIST, OTHER_ATOM_CLASH_DIST, 0], # C
+    [3.0, 2.5, 2.5, 3.0, METAL_CLASH_DIST, OTHER_ATOM_CLASH_DIST, 0], # O
+    [3.0, 2.5, 2.5, 3.0, METAL_CLASH_DIST, OTHER_ATOM_CLASH_DIST, 0], # N
+    [3.4, 3.0, 3.0, 3.4, METAL_CLASH_DIST, OTHER_ATOM_CLASH_DIST, 0], # S
+    [METAL_CLASH_DIST] * 6 + [0],                                        # metals
+    ([OTHER_ATOM_CLASH_DIST]*4) + [METAL_CLASH_DIST, OTHER_ATOM_CLASH_DIST, 0], # other
+    [0] * 7,                                        # metals
+])
 
 # Map of one letter amino acid codes to their corresponding atom order.
 dataset_atom_order = {
@@ -109,3 +129,30 @@ ideal_bond_angles = torch.load(os.path.join(parent_path, '../files', 'new_ideal_
 alignment_indices = torch.load(os.path.join(parent_path, '../files', 'rotamer_alignment.pt'))
 alignment_indices_mask = alignment_indices == -1
 alignment_indices[alignment_indices_mask] = MAX_NUM_RESIDUE_ATOMS
+
+amino_acid_to_atom_identity_matrix = torch.zeros(20, 15, dtype=torch.long)
+for aa, atom_list in dataset_atom_order.items():
+    if aa == 'X':
+        continue
+    amino_acid_to_atom_identity_matrix[aa_long_to_idx[aa_short_to_long[aa]]] = torch.tensor([ATOM_IDENTITY_ENUM.index(atom_list[idx][0]) if idx < idx < len(atom_list) and atom_list[idx][0] in ATOM_IDENTITY_ENUM else ATOM_IDENTITY_ENUM.index("Padding") for idx in range(15)])
+
+hbond_candidate_indices = torch.tensor([aa_long_to_idx[aa_short_to_long[x]] for x,y in dataset_atom_order.items() if any(atom[0] in HBOND_CAPABLE_ELEMENTS for atom in y[4:])])
+hbond_candidate_set = {aa_idx_to_short[x] for x in hbond_candidate_indices.tolist()}
+
+hbond_mask_dict = {}
+hbond_element_dict = {}
+for residue in hbond_candidate_set:
+    residue_index_list = []
+    residue_element_list = []
+    for idx, atom in enumerate(dataset_atom_order[residue][4:]):
+        # Ignore non-{O, N, S} atoms.
+        if not atom[0] in HBOND_CAPABLE_ELEMENTS:
+            continue
+
+        # Store index and element in the same orders.
+        residue_index_list.append(idx)
+        residue_element_list.append(HBOND_CAPABLE_ELEMENTS.index(atom[0]))
+
+    # Store indices for atoms in coordinate matrices and elements for each atom.
+    hbond_mask_dict[residue] = torch.tensor(residue_index_list)
+    hbond_element_dict[residue] = residue_element_list
