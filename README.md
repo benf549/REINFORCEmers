@@ -47,6 +47,7 @@ clouds implied by the chosen chi angles evaluate these generated point clouds to
 ├── rotamer_env : unused Gym Env
 ├── train_reinforced.py : train pretrained model using REINFORCE
 ├── train_supervised.py : pretrain model
+├── analysis : analysis scripts used to compare supervised learning pretrained model and REINFORCE-finetuned model to ground truth rotamers.
 ├── dataset_parsing : all dataset parsing scripts used to generate the inputs to the model (usually a standalone repo)
 └── utils
     ├── build_rotamers.py : calculates atom coords given chi angles
