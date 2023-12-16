@@ -1,0 +1,27 @@
+HETATM    1  N   ALA     0       1.456  -0.014  -0.004  0.00  0.00           N  
+HETATM    2  CA  ALA     0      -0.012   0.006   0.018  0.00  0.00           C  
+HETATM    3  C   ALA     0      -0.535  -1.405  -0.009  0.00  0.00           C  
+HETATM    4  O   ALA     0       0.097  -2.273  -0.562  0.00  0.00           O  
+HETATM    5  CB  ALA     0      -0.530   0.765  -1.204  0.00  0.00           C  
+HETATM    6  OXT ALA     0      -1.702  -1.700   0.583  0.00  0.00           O  
+HETATM    7  H   ALA     0       1.727  -0.480  -0.856  0.00  0.00           H  
+HETATM    8  H2  ALA     0       1.758   0.945  -0.090  0.00  0.00           H  
+HETATM    9  HA  ALA     0      -0.354   0.504   0.926  0.00  0.00           H  
+HETATM   10  HB1 ALA     0      -0.152   1.788  -1.185  0.00  0.00           H  
+HETATM   11  HB2 ALA     0      -0.187   0.269  -2.111  0.00  0.00           H  
+HETATM   12  HB3 ALA     0      -1.620   0.781  -1.188  0.00  0.00           H  
+HETATM   13  HXT ALA     0      -2.038  -2.607   0.566  0.00  0.00           H  
+CONECT    1    2    7    8
+CONECT    2    1    3    5    9
+CONECT    3    2    4    6
+CONECT    4    3
+CONECT    5    2   10   11   12
+CONECT    6    3   13
+CONECT    7    1
+CONECT    8    1
+CONECT    9    2
+CONECT   10    5
+CONECT   11    5
+CONECT   12    5
+CONECT   13    6
+END
