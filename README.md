@@ -1,6 +1,8 @@
 
 # REINFORCEmers: Protein sidechain packing using a biophysically motivated reward function
 
+WandB Session with Logged Training Runs: https://wandb.ai/benf549/reinforcemers?workspace=user-benf549
+
 ## Reinforcemer GNN Model Description
 We implemented a graph-transformer inspired by the ProteinMPNN
 architecture to predict amino acid sidechain orientation given fixed backbone coordinates and
