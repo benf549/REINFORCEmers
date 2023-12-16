@@ -11,9 +11,13 @@ from torchrl.envs import (
 import gym
 from rotamer_env.rotamer_env import rotamer_env
 from torchrl.envs.utils import check_env_specs, ExplorationType, set_exploration_type
-from torchrl.envs.libs.gym import GymEnv
+from torchrl.envs.libs.gym import GymEnv, GymWrapper
+
 from IPython import embed
 
+'''
+Start of PPO loss function, not used in final project
+'''
 SUB_BATCH_SIZE = 64
 NUM_EPOCHS = 10
 #clip value for PPO loss
@@ -35,8 +39,3 @@ def transform_env(base_env:gym.Env):
     )
 def compute_loss():
     raise NotImplementedError
-
-def fuckfuckfuck():
-    base_env = gym.make("rotamer_env/rotamer_env-v0")
-    torch_base_env = GymEnv('rotamer_env/rotamer_env-v0')
-    print('yay!')
