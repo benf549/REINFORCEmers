@@ -32,8 +32,7 @@ then be used to concatenate the encoded representation of a current node to any 
 chi angles in order to autoregressively predict the next node. We supply the logits produced by the model as inputs to a cross-entropy function for supervised pretraining learning with the target χ
 angles encoded in the same manner.
 By predicting sidechain coordinates for all amino acids in a protein, we can construct 3D point
-clouds implied by the chosen chi angles evaluate these generated point clouds to compute a reward as
-featurized in section 1.5.
+clouds implied by the chosen chi angles evaluate these generated point clouds to compute a reward.
 
 ## Reinforcemers file structure
 ```
