@@ -1,5 +1,8 @@
 # reinforcemers
 
+Training logged to:
+https://wandb.ai/benf549/reinforcemers?workspace=user-benf549
+
 ```
 .
 ├── GAE.py : unused A2C model for PPO loss
