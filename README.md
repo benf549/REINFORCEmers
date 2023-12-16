@@ -5,7 +5,7 @@
 ├── GAE.py : unused A2C model for PPO loss
 ├── README.md
 ├── evaluate_model.py : evaluation scripts
-├── files : helper functions and data for model
+├── files : helper tensors used to build 3d coordinates from model outputs
 ├── generate_sequence_clusters.py : cluster seqs for train splits
 ├── rotamer_env : unused Gym Env
 ├── train_reinforced.py : train pretrained model using REINFORCE
