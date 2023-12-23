@@ -45,7 +45,7 @@ class BatchData():
         """
         for k,v in self.__dict__.items():
             if isinstance(v, torch.Tensor):
-                self.__dict__[k] = v.to(device)
+                self.__dict__[k] = v.clone().to(device)
 
 
 def get_list_of_all_paths(path: str) -> list:
@@ -227,6 +227,7 @@ class ClusteredDatasetSampler(Sampler):
         self.dataset = dataset
         self.batch_size = params['batch_size']
         self.sample_randomly = params['sample_randomly']
+        self.max_protein_length = params['max_protein_size']
 
         # Load the cluster data.
         print("Loading sequence clusters.")
@@ -268,8 +269,23 @@ class ClusteredDatasetSampler(Sampler):
             curr_cluster_set = self.test_split_clusters
         else:
             curr_cluster_set = self.train_split_clusters
+        
+        # Filter the clusters for train or test set.
+        output = {k: v for k,v in self.cluster_to_chains.items() if k in curr_cluster_set}
 
-        return {k: v for k,v in self.cluster_to_chains.items() if k in curr_cluster_set}
+        # If we don't have a max protein length, return the output.
+        if self.max_protein_length is None:
+            return output
+        
+        # Drop things that are longer than the max protein length.
+        filtered_output = defaultdict(list)
+        for cluster_rep, cluster_list in output.items():
+            for chain in cluster_list:
+                chain_len = self.dataset.index_to_complex_size[self.dataset.chain_key_to_index[chain]]
+                if chain_len <= self.max_protein_length:
+                    filtered_output[cluster_rep].append(chain)
+        return filtered_output
+    
 
     def get_curr_sample_len(self) -> int:
         """
@@ -316,6 +332,13 @@ class ClusteredDatasetSampler(Sampler):
         curr_samples_tensor = torch.tensor(self.curr_samples)
         sizes = torch.tensor([self.dataset.index_to_complex_size[x] for x in self.curr_samples])
         size_sort_indices = torch.argsort(sizes)
+
+        # if self.max_protein_length is not None:
+        #     size_mask = sizes <= self.max_protein_length
+
+        #     sizes = sizes[size_mask]
+        #     curr_samples_tensor = curr_samples_tensor[size_mask]
+        #     size_sort_indices = torch.argsort(sizes)
 
         # iterate through the samples in order of size, create batches of size batch_size.
         index = 0
