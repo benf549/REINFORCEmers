@@ -1,144 +1,23 @@
 #!/usr/bin/env python3
 
-import os
 import wandb
-import subprocess
-import prody as pr
 from tqdm import tqdm
 from typing import Optional
-import multiprocessing as mp
 from collections import defaultdict
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+import torch.multiprocessing as mp
+from multiprocessing.pool import Pool
 
 from utils.build_rotamers import compute_chi_angle_accuracies
 from utils.dataset import ClusteredDatasetSampler, UnclusteredProteinChainDataset, collate_sampler_data, BatchData
 from utils.model import ReinforcemerRepacker
-from utils.compute_reward import compute_pairwise_clash_penalties
-from evaluate_model import create_prody_protein_from_coordinate_matrix
+from utils.loss import compute_reinforce_loss, compute_probe_reward, batch_to_pdb_list
 
 
-def compute_reinforce_loss(log_prob_action, reward):
-    """
-    Define the simplest REINFORCE loss we can optimize with gradient descent.
-    """
-    return -1 * log_prob_action * reward
-
-
-@torch.no_grad()
-def batch_to_pdb_list(batch: BatchData, reinforced_chi_samples: torch.Tensor, reinforced_model: ReinforcemerRepacker) -> list:
-    # Set models to eval mode.
-    reinforced_model.eval()
-
-    # Build 3D coordinates for all residues in the protein with rotatable hydrogens.
-    fa_model = reinforced_model.rotamer_builder.build_rotamers(batch.backbone_coords, reinforced_chi_samples, batch.sequence_indices)
-
-    reinforced_chi_samples = reinforced_chi_samples.clone().cpu()
-    fa_model = fa_model.detach().cpu()
-    batch.to_device(torch.device('cpu'))
-
-    output = []
-    # Iterate through batch indices.
-    for idx, batch_index in enumerate(sorted(list(set(batch.batch_indices.cpu().numpy())))):
-        curr_batch_mask = batch.batch_indices == batch_index
-
-        curr_sequence_indices = batch.sequence_indices[curr_batch_mask]
-        curr_eval_mask = ~batch.extra_atom_contact_mask[curr_batch_mask]
-        curr_fa_coords = fa_model[curr_batch_mask]
-
-        prody_protein = create_prody_protein_from_coordinate_matrix(curr_fa_coords, curr_sequence_indices, curr_eval_mask.float())
-        output.append(prody_protein)
-
-    return output
-
-
-def parse_probe_line(line):
-    """
-    Stolen from Combs2/dataset/probe.py
-    Parses the probe output schema for relevant features.
-    """
-    spl = line.split(':')[1:]
-    interaction = spl[1]
-    chain1 = spl[2][:2].strip()
-    resnum1 = int(spl[2][2:6])
-    resname1 = spl[2][6:10].strip()
-    name1 = spl[2][10:15].strip()
-    atomtype1 = spl[12]
-    chain2 = spl[3][:2].strip()
-    resnum2 = int(spl[3][2:6])
-    resname2 = spl[3][6:10].strip()
-    name2 = spl[3][10:15].strip()
-    atomtype2 = spl[13]
-    return interaction, chain1, resnum1, resname1, name1, atomtype1, chain2, resnum2, resname2, name2, atomtype2
-
-
-def compute_probe_metadata(protein_path, num_residues, device, include_wc=False):
-    temp_path = protein_path.replace('.pdb', '_reduce.pdb')
-
-    # Add hydrogens to protein.
-    reduce_command = f"reduce -NOADJust {protein_path} > {temp_path}"
-    subprocess.run(reduce_command, shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-
-    # Compute probe metadata.
-    probe_command = f"probe -U -SEGID -CON -NOFACE -Explicit -MC -WEAKH -DE32 -4 -SE 'ALL' {temp_path}"
-    output = subprocess.check_output(probe_command, shell=True, stderr=subprocess.DEVNULL).decode('utf-8')
-
-
-    # there can be multiple interactions per residue so we need to store them in a set
-    probe_dict_interactions = defaultdict(set)
-    output_tensor = torch.zeros((num_residues,), dtype=torch.float16, device=device)
-    for line in output.strip().split('\n'):
-        line_data = parse_probe_line(line)
-        residue = line_data[1:4]
-        interaction = line_data[0]
-        probe_dict_interactions[residue].add(interaction)
-
-    # Process probe metadata for hydrogen bonds and clashes.
-    for residue, interactions in probe_dict_interactions.items():
-        # Hierarchically assigns value to each interaction type.
-        if 'bo' in interactions:
-            # Clash interaction type should be penalized
-            interaction_value = -1.0
-        elif 'hb' in interactions:
-            # Regular hydrogen bond type should be rewarded
-            interaction_value = 1.0
-        elif 'wh' in interactions:
-            # Weak hydrogen bond type should be rewarded
-            interaction_value = 0.5
-        elif 'so' in interactions:
-            # Strong overlap (redundant with bo)
-            interaction_value = 0
-        elif 'cc' in interactions:
-            # Close Contact (redundant with bo)
-            interaction_value = 0
-        elif include_wc and 'wc' in interactions:
-            # Water mediated contact irrelevant unless we place waters somehow.
-            interaction_value = 0
-        else:
-            continue
-        output_tensor[residue[1] - 1] = interaction_value
-    return output_tensor
-
-
-def compute_probe_reward(protein_list, device):
-    """
-    This is super inefficient but whatever lol.
-    """
-    output_list = []
-    temp_path = '/scratch/bfry/temp2/'
-    for protein in protein_list:
-        # Write protein to disk.
-        protein_path = os.path.join(temp_path, 'test_protein.pdb')
-        pr.writePDB(protein_path, protein)
-
-        # Compute probe metadata from pdb file.
-        output_list.append(compute_probe_metadata(protein_path, protein.numResidues(), device))
-    return torch.cat(output_list, dim=0)
-
-
-def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.Adam], dataloader: DataLoader, epoch_num: int, params: dict):
+def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.Adam], dataloader: DataLoader, epoch_num: int, worker_pool: Pool, params: dict):
 
     is_train_epoch = optimizer is not None
 
@@ -180,7 +59,7 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
 
         # Compute reward for each sampled chi angle.
         pdb_list = batch_to_pdb_list(batch, sampled_chi_angles, model)
-        reward = compute_probe_reward(pdb_list, model.device)
+        reward = compute_probe_reward(pdb_list, worker_pool, model.device)
 
         # Reward is negative or positive penalties.
         masked_reward = reward[valid_residue_mask]
@@ -212,21 +91,20 @@ def process_epoch(model: ReinforcemerRepacker, optimizer: Optional[torch.optim.A
     return {**epoch_data, **epoch_list_data}
 
 
-def train_epoch(model: ReinforcemerRepacker, optimizer: torch.optim.Adam, dataloader: DataLoader, epoch_num: int, params: dict):
+def train_epoch(model: ReinforcemerRepacker, optimizer: torch.optim.Adam, dataloader: DataLoader, epoch_num: int, worker_pool: Pool, params: dict):
     model.train()
-    epoch_data = process_epoch(model, optimizer, dataloader, epoch_num, params)
+    epoch_data = process_epoch(model, optimizer, dataloader, epoch_num, worker_pool, params)
     return {'train_' + x: y for x,y in epoch_data.items()}
 
 
 @torch.no_grad()
-def test_epoch(model: ReinforcemerRepacker, dataloader: DataLoader, epoch_num: int, params: dict) -> dict:
+def test_epoch(model: ReinforcemerRepacker, dataloader: DataLoader, epoch_num: int, worker_pool: Pool, params: dict) -> dict:
     """
     Evaluate model on test set. model.eval() enables autoregressive sampling.
     """
     model.eval()
-    epoch_data = process_epoch(model, None, dataloader, epoch_num, params)
+    epoch_data = process_epoch(model, None, dataloader, epoch_num, worker_pool, params)
     return {'test_' + x: y for x,y in epoch_data.items()}
-
 
 def main(params: dict) -> None:
     # Initialize device, model, and optimmizer for gradient descent.
@@ -244,36 +122,38 @@ def main(params: dict) -> None:
 
     # sample train clusters to create batches of approximately batch_size, and load batches with dataloader.
     train_sampler = ClusteredDatasetSampler(protein_dataset, params, is_test_dataset_sampler=False)
-    train_dataloader = DataLoader(protein_dataset, batch_sampler=train_sampler, collate_fn=collate_sampler_data, num_workers=params['num_workers'], persistent_workers=True)
+    train_dataloader = DataLoader(protein_dataset, batch_sampler=train_sampler, collate_fn=collate_sampler_data, num_workers=params['num_dataloader_workers'], persistent_workers=True)
 
     # sample test clusters.
     test_sampler = ClusteredDatasetSampler(protein_dataset, params, is_test_dataset_sampler=True)
-    test_dataloader = DataLoader(protein_dataset, batch_sampler=test_sampler, collate_fn=collate_sampler_data, num_workers=params['num_workers'], persistent_workers=True)
+    test_dataloader = DataLoader(protein_dataset, batch_sampler=test_sampler, collate_fn=collate_sampler_data, num_workers=params['num_dataloader_workers'], persistent_workers=True)
 
-    epoch_num = -1
-    for epoch_num in range(params['num_epochs']):
-        # Train the model for an epoch.
-        train_epoch_data = train_epoch(model, optimizer, train_dataloader, epoch_num, params)
+    # Train inside a multiprocessing pool.
+    with mp.Pool(processes=params['num_multiprocessing_workers']) as worker_pool:
+        epoch_num = -1
+        for epoch_num in range(params['num_epochs']):
+            # Train the model for an epoch.
+            train_epoch_data = train_epoch(model, optimizer, train_dataloader, epoch_num, worker_pool, params)
 
-        # Test model every few epochs.
-        test_epoch_data = {}
-        if epoch_num % 5 == 0:
-            test_epoch_data = test_epoch(model, test_dataloader, epoch_num, params)
-            if not params['debug']:
-                torch.save(model.state_dict(), f"{params['weights_output_prefix']}_{epoch_num}.pt")
+            # Test model every few epochs.
+            test_epoch_data = {}
+            if epoch_num % 5 == 0:
+                test_epoch_data = test_epoch(model, test_dataloader, epoch_num, worker_pool, params)
+                if not params['debug']:
+                    torch.save(model.state_dict(), f"{params['weights_output_prefix']}_{epoch_num}.pt")
 
-        # Combine train and test metadata.
-        epoch_data = {**train_epoch_data, **test_epoch_data, 'epoch': epoch_num}
+            # Combine train and test metadata.
+            epoch_data = {**train_epoch_data, **test_epoch_data, 'epoch': epoch_num}
 
-        # Log metadata to wandb.
-        if params['use_wandb']:
-            wandb.log(dict(epoch_data))
+            # Log metadata to wandb.
+            if params['use_wandb']:
+                wandb.log(dict(epoch_data))
 
-        # Print training data to console.
-        out = []
-        for key, value in epoch_data.items():
-            out.append(f"{key}: {value:0.6f}")
-        print(', '.join(out))
+            # Print training data to console.
+            out = []
+            for key, value in epoch_data.items():
+                out.append(f"{key}: {value:0.6f}")
+            print(', '.join(out))
 
     # Save the model weights.
     if not params['debug']:
@@ -282,17 +162,18 @@ def main(params: dict) -> None:
 
 if __name__ == "__main__":
     params = {
-        'debug': (debug := True),
+        'debug': (debug := False),
         'use_wandb': True and not debug,
         'use_supervised_learning_weights': (use_pretrained_model := True),
         'model_input_weights_path': ('./model_weights/supervised_model_weights_teacher_forced_track_chi_acc_1_80.pt' if use_pretrained_model else None),
         'weights_output_prefix': './model_weights/debug_probe_finetuned',
-        'num_workers': 2,
+        'num_multiprocessing_workers': 20,
+        'num_dataloader_workers': 2,
         'num_epochs': 100,
         'batch_size': 10_000,
         'max_protein_size': 500,
         'max_clash_penalty': 1,
-        'learning_rate': 1e-8,
+        'learning_rate': 1e-5,
         'training_noise': 0.05,
         'sample_randomly': True,
         'train_splits_path': ('./files/train_splits_debug.pt' if debug else './files/train_splits.pt'),
